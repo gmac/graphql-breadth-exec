@@ -1,4 +1,4 @@
-SCHEMA = GraphQL::Schema.from_definition(%|
+SDL = <<~SCHEMA
   interface Node {
     id: ID!
   }
@@ -47,7 +47,9 @@ SCHEMA = GraphQL::Schema.from_definition(%|
   type Mutation {
     writeValue(value: String!): WriteValuePayload
   }
-|)
+SCHEMA
+
+SCHEMA = GraphQL::Schema.from_definition(SDL)
 
 class WriteValueResolver < GraphQL::Cardinal::FieldResolver
   def resolve(objects, _args, _ctx, _scope)
@@ -118,6 +120,27 @@ DEPTH_RESOLVERS = {
   },
   "Query" => {
     "products" => ->(obj) { obj["products"] },
+  },
+}.freeze
+
+GEM_RESOLVERS = {
+  "Product" => {
+    "id" => ->(obj, args, ctx) { obj["id"] },
+    "title" => ->(obj, args, ctx) { obj["title"] },
+    "variants" => ->(obj, args, ctx) { obj["variants"] },
+  },
+  "ProductConnection" => {
+    "nodes" => ->(obj, args, ctx) { obj["nodes"] },
+  },
+  "Variant" => {
+    "id" => ->(obj, args, ctx) { obj["id"] },
+    "title" => ->(obj, args, ctx) { obj["title"] },
+  },
+  "VariantConnection" => {
+    "nodes" => ->(obj, args, ctx) { obj["nodes"] },
+  },
+  "Query" => {
+    "products" => ->(obj, args, ctx) { obj["products"] },
   },
 }.freeze
 

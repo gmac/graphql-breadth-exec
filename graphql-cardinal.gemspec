@@ -1,7 +1,6 @@
-# coding: utf-8
-lib = File.expand_path('../lib', __FILE__)
-$LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
-require 'graphql/cardinal/version'
+# frozen_string_literal: true
+
+require_relative 'lib/graphql/cardinal/version'
 
 Gem::Specification.new do |spec|
   spec.name          = 'graphql-cardinal'
@@ -27,8 +26,11 @@ Gem::Specification.new do |spec|
   spec.require_paths = ['lib']
 
   spec.add_runtime_dependency 'graphql', '>= 2.0'
+  spec.add_runtime_dependency 'ostruct'
 
   spec.add_development_dependency 'bundler', '~> 2.0'
   spec.add_development_dependency 'rake', '~> 12.0'
   spec.add_development_dependency 'minitest', '~> 5.12'
+  spec.add_development_dependency 'benchmark-ips', '~> 2.0'
+  spec.add_development_dependency 'memory_profiler'
 end
