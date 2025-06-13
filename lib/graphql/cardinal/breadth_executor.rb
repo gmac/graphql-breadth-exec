@@ -3,6 +3,8 @@
 module GraphQL
   module Cardinal
     class BreadthExecutor
+      include Scalars
+
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object)
@@ -39,7 +41,11 @@ module GraphQL
 
             if field_type.kind.leaf?
               resolved_sources.each_with_index do |val, i|
-                responses[i][field_key] = val
+                responses[i][field_key] = if !val.nil? && field_type.kind.scalar?
+                  coerce_scalar_value(field_type, val)
+                else
+                  val
+                end
               end
             else
               next_sources = []

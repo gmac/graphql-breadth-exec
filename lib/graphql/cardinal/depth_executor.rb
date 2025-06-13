@@ -3,6 +3,8 @@
 module GraphQL
   module Cardinal
     class DepthExecutor
+      include Scalars
+
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object)
@@ -39,7 +41,11 @@ module GraphQL
               node_type = node_type.of_type while node_type.non_null?
               exec_list_scope(node_type, node.selections, resolved_source, path: path)
             elsif named_type.kind.leaf?
-              resolved_source
+              if !resolved_source.nil? && named_type.kind.scalar?
+                coerce_scalar_value(named_type, resolved_source)
+              else
+                resolved_source
+              end
             else
               exec_object_scope(named_type, node.selections, resolved_source, path: path)
             end
