@@ -1,3 +1,5 @@
 ## GraphQL Cardinal breadth-first executor
 
-Here we go...
+![GraphQL Cardinal](./graphql-cardinal.png)
+
+Yes, this project used AI.
