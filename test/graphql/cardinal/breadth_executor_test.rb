@@ -27,7 +27,8 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
   def test_runs
     executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, DOCUMENT, SOURCE)
     result = executor.perform
-    pp result
+    puts executor.exec_count
+    # pp result
     assert_equal SOURCE, result
   end
 end

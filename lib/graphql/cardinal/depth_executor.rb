@@ -22,8 +22,8 @@ module GraphQL
 
       private
 
-      def exec_object_scope(parent_type, selections, source, path:)
-        response = {}
+      def exec_object_scope(parent_type, selections, source, path:, response: nil)
+        response ||= {}
         selections.each do |node|
           case node
           when GraphQL::Language::Nodes::Field
@@ -47,12 +47,12 @@ module GraphQL
 
           when GraphQL::Language::Nodes::InlineFragment
             fragment_type = node.type ? @query.get_type(node.type.name) : parent_type
-            exec_object_scope(fragment_type, node.selections, source, path: path)
+            exec_object_scope(fragment_type, node.selections, source, path: path, response: response)
 
           when GraphQL::Language::Nodes::FragmentSpread
             fragment = @query.fragments[node.name]
             fragment_type = @query.get_type(fragment.type.name)
-            exec_object_scope(fragment_type, node.selections, source, path: path)
+            exec_object_scope(fragment_type, node.selections, source, path: path, response: response)
 
           else
             raise DocumentError.new("selection node type")
