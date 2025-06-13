@@ -9,17 +9,28 @@
 /test/tmp/
 /test/version_tmp/
 /tmp/
+.envrc
+Gemfile.lock
 
 # Used by dotenv library to load environment variables.
 # .env
+/example/env.json
 
 # Ignore Byebug command history file.
 .byebug_history
+.ruby-version
+.DS_Store
+
+examples/subscriptions/log/*
+examples/subscriptions/tmp/*
+examples/subscriptions/storage/*
 
 ## Specific to RubyMotion:
 .dat*
 .repl_history
 build/
+node_modules/
+package-lock.json
 *.bridgesupport
 build-iPhoneOS/
 build-iPhoneSimulator/

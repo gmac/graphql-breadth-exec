@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - gemfile: Gemfile
+            ruby: 3.3
+    steps:
+    - run: echo BUNDLE_GEMFILE=${{ matrix.gemfile }} > $GITHUB_ENV
+    - uses: actions/checkout@v4
+    - name: Setup Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ matrix.ruby }}
+        bundler-cache: true # runs 'bundle install' and caches installed gems automatically
+    - name: Run tests
+      run: |
+        gem install bundler -v 2.4.22
+        bundle install --jobs 4 --retry 3
+        bundle exec rake test
