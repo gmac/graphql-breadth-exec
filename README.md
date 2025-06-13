@@ -2,4 +2,4 @@
 
 ![GraphQL Cardinal](./graphql-cardinal.png)
 
-Yes, this project used AI.
+Used AI for prototype? Check.

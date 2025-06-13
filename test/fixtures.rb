@@ -27,7 +27,8 @@ DOCUMENT = GraphQL.parse(%|{
   products(first: 3) {
     nodes {
       id
-      ... { title }
+      title
+      # ... { title }
       variants(first: 5) {
         nodes {
           id

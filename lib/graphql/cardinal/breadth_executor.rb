@@ -16,12 +16,12 @@ module GraphQL
         @exec_count = 0
       end
 
-      def perform
+      def perform(shaping: true)
         @query = GraphQL::Query.new(@schema, document: @document) # << for schema reference
         operation = @query.selected_operation
         parent_type = @query.root_type_for_operation(operation.operation_type)
         exec_scope(parent_type, operation.selections, [@root_object], [@data], path: [])
-        @data
+        shaping ? Cardinal::Shaper.perform(@query, @data) : @data
       end
 
       private
