@@ -2,7 +2,7 @@
 
 module GraphQL
   module Cardinal
-    class Executor
+    class BreadthExecutor
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object)

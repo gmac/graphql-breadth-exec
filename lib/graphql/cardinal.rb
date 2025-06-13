@@ -11,5 +11,6 @@ module GraphQL
   end
 end
 
-require_relative "cardinal/executor"
+require_relative "cardinal/breadth_executor"
+require_relative "cardinal/depth_executor"
 require_relative "cardinal/version"
