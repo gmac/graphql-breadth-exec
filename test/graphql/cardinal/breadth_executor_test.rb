@@ -5,22 +5,22 @@ require "test_helper"
 class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
   BREADTH_ESOLVERS = {
     "Product" => {
-      "id" => ->(objs) { objs.map { _1["id"] } },
-      "title" => ->(objs) { objs.map { _1["title"] } },
-      "variants" => ->(objs) { objs.map { _1["variants"] } },
+      "id" => ->(objs, _args, _ctx) { objs.map { _1["id"] } },
+      "title" => ->(objs, _args, _ctx) { objs.map { _1["title"] } },
+      "variants" => ->(objs, _args, _ctx) { objs.map { _1["variants"] } },
     },
     "ProductConnection" => {
-      "nodes" => ->(objs) { objs.map { _1["nodes"] } },
+      "nodes" => ->(objs, _args, _ctx) { objs.map { _1["nodes"] } },
     },
     "Variant" => {
-      "id" => ->(objs) { objs.map { _1["id"] } },
-      "title" => ->(objs) { objs.map { _1["title"] } },
+      "id" => ->(objs, _args, _ctx) { objs.map { _1["id"] } },
+      "title" => ->(objs, _args, _ctx) { objs.map { _1["title"] } },
     },
     "VariantConnection" => {
-      "nodes" => ->(objs) { objs.map { _1["nodes"] } },
+      "nodes" => ->(objs, _args, _ctx) { objs.map { _1["nodes"] } },
     },
     "Query" => {
-      "products" => ->(objs) { objs.map { _1["products"] } },
+      "products" => ->(objs, _args, _ctx) { objs.map { _1["products"] } },
     },
   }.freeze
 
