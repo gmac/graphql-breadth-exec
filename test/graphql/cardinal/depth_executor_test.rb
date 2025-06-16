@@ -42,8 +42,6 @@ class GraphQL::Cardinal::DepthExecutorTest < Minitest::Test
 
     executor = GraphQL::Cardinal::DepthExecutor.new(SCHEMA, DEPTH_RESOLVERS, document, SOURCE)
     result = executor.perform
-    puts executor.exec_count
-    #pp result
     assert_equal SOURCE, result
   end
 end

@@ -1,7 +1,21 @@
 SCHEMA = GraphQL::Schema.from_definition(%|
-  type Product {
+  interface Node {
+    id: ID!
+  }
+
+  interface HasMetafields {
+    metafield(key: String!): Metafield
+  }
+
+  type Metafield {
+    key: String!
+    value: String!
+  }
+
+  type Product implements Node & HasMetafields {
     id: ID!
     title: String
+    metafield(key: String!): Metafield
     variants(first: Int!): VariantConnection
   }
 
@@ -9,7 +23,7 @@ SCHEMA = GraphQL::Schema.from_definition(%|
     nodes: [Product!]!
   }
 
-  type Variant {
+  type Variant implements Node {
     id: ID!
     title: String
   }
@@ -20,6 +34,8 @@ SCHEMA = GraphQL::Schema.from_definition(%|
 
   type Query {
     products(first: Int): ProductConnection
+    nodes(ids: [ID!]!): [Node]!
+    node(id: ID!): Node
   }
 |)
 

@@ -29,6 +29,7 @@ module GraphQL
 
       def perform
         @query = GraphQL::Query.new(@schema, document: @document) # << for schema reference
+        @context[:query] = @query
         operation = @query.selected_operation
 
         scopes_to_execute = [
@@ -62,56 +63,72 @@ module GraphQL
           field_name = exec_field.name
           Authorization.can_access_field?(parent_type, field_name, @context)
 
-          return_type = @query.get_field(parent_type, field_name).type
-          child_type = return_type.unwrap
-          Authorization.can_access_type?(child_type, @context)
+          wrapped_return_type = @query.get_field(parent_type, field_name).type
+          return_type = wrapped_return_type.unwrap
+          Authorization.can_access_type?(return_type, @context)
 
           field_resolver = @resolvers.dig(parent_type.graphql_name, field_name)
           resolved_sources = begin
-            @tracer.before_resolve_field(parent_type, field_name, parent_sources.length, @context)
+            @tracer&.before_resolve_field(parent_type, field_name, parent_sources.length, @context)
             field_resolver.call(parent_sources, exec_field.arguments(@variables), @context)
           rescue StandardError => e
-            # oh shit...
-            puts e
+            Array.new(parent_sources.length, InternalError.new)
           ensure
-            @tracer.after_resolve_field(parent_type, field_name, parent_sources.length, @context)
+            @tracer&.after_resolve_field(parent_type, field_name, parent_sources.length, @context)
             @exec_count += 1
           end
 
-          raise ExecutionError, "Incorrect results" if resolved_sources.length != parent_sources.length
+          raise InternalError, "Incorrect results" if resolved_sources.length != parent_sources.length
 
-          if child_type.kind.abstract?
-            sources_by_impl_type = Hash.new { |h, k| h[k] = [] }
-            responses_by_impl_type = Hash.new { |h, k| h[k] = [] }
+          if return_type.kind.composite?
+            # build results with child selections
+            next_sources = []
+            next_responses = []
             resolved_sources.each_with_index do |source, i|
-              impl_type = parent_type.resolve_type(source)
-              sources_by_impl_type[impl_type] << source
-              responses_by_impl_type[impl_type] << parent_responses[i]
+              parent_responses[i][key] = build_composite_response(wrapped_return_type, source, next_sources, next_responses)
             end
 
-            sources_by_impl_type.each do |impl_type, type_sources|
-              type_responses = responses_by_impl_type[impl_type]
-              unless Authorization.can_access_type?(impl_type, @context)
-                type_sources = Array.new(StandardError.new("Authorization error"), type_sources.length)
+            if return_type.kind.abstract?
+              type_resolver = @resolvers.dig(return_type.graphql_name, "__type__")
+              next_sources_by_type = Hash.new { |h, k| h[k] = [] }
+              next_responses_by_type = Hash.new { |h, k| h[k] = [] }
+              next_sources.each_with_index do |source, i|
+                impl_type = type_resolver.call(source, @context)
+                next_sources_by_type[impl_type] << source
+                next_responses_by_type[impl_type] << next_responses[i]
               end
 
-              prepare_responses(key, return_type, impl_type, type_sources, type_responses) do |next_sources, next_responses|
+              next_sources_by_type.each do |impl_type, impl_type_sources|
+                # check concrete type access only once per resolved type...
+                unless Authorization.can_access_type?(impl_type, @context)
+                  impl_type_sources = Array.new(impl_type_sources.length, AuthorizationError.new)
+                end
+
                 next_scopes << ExecutionScope.new(
                   parent_type: impl_type,
                   selections: exec_field.selections,
-                  sources: next_sources,
-                  responses: next_responses,
+                  sources: impl_type_sources,
+                  responses: next_responses_by_type[impl_type],
                 )
               end
-            end
-          else
-            prepare_responses(key, return_type, child_type, resolved_sources, parent_responses) do |next_sources, next_responses|
+            else
               next_scopes << ExecutionScope.new(
-                parent_type: child_type,
+                parent_type: return_type,
                 selections: exec_field.selections,
                 sources: next_sources,
                 responses: next_responses,
               )
+            end
+          else
+            # build leaf results
+            resolved_sources.each_with_index do |val, i|
+              parent_responses[i][key] = if val.nil? || val.is_a?(StandardError)
+                handle_missing_value(wrapped_return_type, val)
+              elsif return_type.kind.scalar?
+                coerce_scalar_value(wrapped_return_type, val)
+              else
+                val
+              end
             end
           end
 
@@ -121,42 +138,19 @@ module GraphQL
         next_scopes
       end
 
-      def prepare_responses(key, return_type, child_type, sources, responses)
-        if child_type.kind.composite?
-          # build results with child selections
-          next_sources = []
-          next_responses = []
-          sources.each_with_index do |source, i|
-            responses[i][key] = build_response(return_type, source, next_sources, next_responses)
-          end
-
-          yield(next_sources, next_responses)
-        else
-          # build leaf results
-          sources.each_with_index do |val, i|
-            responses[i][key] = if val.nil? || val.is_a?(StandardError)
-              @non_null_violation = true if return_type.non_null?
-              # format error if val (error)...
-              nil
-            elsif child_type.kind.scalar?
-              coerce_scalar_value(return_type, val)
-            else
-              val
-            end
-          end
-        end
-      end
-
-      def build_response(return_type, source, next_sources, next_responses)
+      def build_composite_response(wrapped_return_type, source, next_sources, next_responses)
         # if object authorization check implemented, then...
-        # unless Authorization.can_access_object?(child_type, source, @context)
+        # unless Authorization.can_access_object?(return_type, source, @context)
 
         if source.nil? || source.is_a?(StandardError)
-          @non_null_violation = true if return_type.non_null?
-          # format error if val (error)...
-          nil
-        elsif return_type.list?
-          build_list_response(return_type, source, next_sources, next_responses)
+          handle_missing_value(wrapped_return_type, source)
+        elsif wrapped_return_type.list?
+          # error if not array...
+          wrapped_return_type = wrapped_return_type.of_type while wrapped_return_type.non_null?
+
+          source.map do |src|
+            build_composite_response(wrapped_return_type.of_type, src, next_sources, next_responses)
+          end
         else
           next_sources << source
           next_responses << {}
@@ -164,12 +158,16 @@ module GraphQL
         end
       end
 
-      def build_list_response(return_type, sources, next_sources, next_responses)
-        return_type = return_type.of_type while return_type.non_null?
-
-        sources.map do |source|
-          build_response(return_type.of_type, source, next_sources, next_responses)
+      def handle_missing_value(wrapped_return_type, val)
+        is_error = !!val
+        if is_error
+          # do something...?
         end
+        if wrapped_return_type.non_null?
+          @non_null_violation = true
+          # format error if val (error)...
+        end
+        nil
       end
 
       def execution_fields_by_key(parent_type, selections, map: Hash.new { |h, k| h[k] = ExecutionField.new })

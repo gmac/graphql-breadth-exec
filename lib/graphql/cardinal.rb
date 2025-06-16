@@ -9,6 +9,9 @@ module GraphQL
     EMPTY_OBJECT = {}.freeze
 
     class ExecutionError < StandardError; end
+    class InternalError < ExecutionError; end
+    class InvalidNullError < ExecutionError; end
+    class AuthorizationError < ExecutionError; end
     class DocumentError < StandardError; end
   end
 end
