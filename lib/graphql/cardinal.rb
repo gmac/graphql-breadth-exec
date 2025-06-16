@@ -16,6 +16,7 @@ module GraphQL
   end
 end
 
+require_relative "cardinal/promise"
 require_relative "cardinal/scalars"
 require_relative "cardinal/shaper"
 require_relative "cardinal/breadth_executor"
