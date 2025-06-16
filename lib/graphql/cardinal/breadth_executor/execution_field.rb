@@ -8,6 +8,7 @@ module GraphQL::Cardinal
       def initialize
         @node = nil
         @nodes = nil
+        @arguments = nil
       end
 
       def name
@@ -35,8 +36,27 @@ module GraphQL::Cardinal
       def arguments(vars)
         return EMPTY_OBJECT if @node.arguments.empty?
 
-        @node.arguments.each_with_object({})do |a, args|
-          args[a.name] = a.value
+        @arguments ||= @node.arguments.each_with_object({}) do |arg, args|
+          args[arg.name] = coerce_arguments(arg.value, vars)
+        end
+      end
+
+      private
+
+      def coerce_arguments(value, vars)
+        case value
+        when GraphQL::Language::Nodes::VariableIdentifier
+          vars[value.name] || vars[value.name.to_sym]
+        when GraphQL::Language::Nodes::NullValue
+          nil
+        when GraphQL::Language::Nodes::InputObject
+          value.arguments.each_with_object({}) do |arg, obj|
+            obj[arg.name] = coerce_arguments(arg.value, vars)
+          end
+        when Array
+          value.map { |item| coerce_arguments(item, vars) }
+        else
+          value
         end
       end
     end

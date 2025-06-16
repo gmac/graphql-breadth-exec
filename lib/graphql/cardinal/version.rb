@@ -2,6 +2,6 @@
 
 module GraphQL
   module Cardinal
-    VERSION = "1.7.3"
+    VERSION = "0.0.1"
   end
 end
