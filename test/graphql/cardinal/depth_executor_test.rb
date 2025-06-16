@@ -25,7 +25,22 @@ class GraphQL::Cardinal::DepthExecutorTest < Minitest::Test
   }.freeze
 
   def test_runs
-    executor = GraphQL::Cardinal::DepthExecutor.new(SCHEMA, DEPTH_RESOLVERS, DOCUMENT, SOURCE)
+    document = GraphQL.parse(%|{
+      products(first: 3) {
+        nodes {
+          id
+          title
+          variants(first: 5) {
+            nodes {
+              id
+              title
+            }
+          }
+        }
+      }
+    }|)
+
+    executor = GraphQL::Cardinal::DepthExecutor.new(SCHEMA, DEPTH_RESOLVERS, document, SOURCE)
     result = executor.perform
     puts executor.exec_count
     #pp result
