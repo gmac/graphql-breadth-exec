@@ -3,13 +3,14 @@
 module GraphQL::Cardinal
   class BreadthExecutor
     class ExecutionScope
-      attr_reader :parent_type, :selections, :sources, :responses
+      attr_reader :parent_type, :selections, :sources, :responses, :parent
 
-      def initialize(parent_type:, selections:, sources:, responses:)
+      def initialize(parent_type:, selections:, sources:, responses:, parent: nil)
         @parent_type = parent_type
         @selections = selections
         @sources = sources
         @responses = responses
+        @parent = parent
       end
     end
   end

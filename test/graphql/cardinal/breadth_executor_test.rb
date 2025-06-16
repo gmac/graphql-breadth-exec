@@ -38,7 +38,7 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
 
   def test_abstract_type_list_access
     document = GraphQL.parse(%|{
-      nodes(ids: $ids) {
+      nodes(ids: ["Product/1", "Variant/1"]) {
         ... on Product {
           id
         }

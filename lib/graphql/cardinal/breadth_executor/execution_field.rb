@@ -3,9 +3,11 @@
 module GraphQL::Cardinal
   class BreadthExecutor
     class ExecutionField
-      attr_reader :node, :nodes
+      attr_reader :key, :node, :nodes
+      attr_accessor :type
 
-      def initialize
+      def initialize(key)
+        @key = key
         @node = nil
         @nodes = nil
         @arguments = nil
