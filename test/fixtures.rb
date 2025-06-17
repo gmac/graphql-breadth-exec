@@ -37,6 +37,14 @@ SCHEMA = GraphQL::Schema.from_definition(%|
     nodes(ids: [ID!]!): [Node]!
     node(id: ID!): Node
   }
+
+  type WriteValuePayload {
+    value: String
+  }
+
+  type Mutation {
+    writeValue(value: String!): WriteValuePayload
+  }
 |)
 
 DOCUMENT = GraphQL.parse(%|{
