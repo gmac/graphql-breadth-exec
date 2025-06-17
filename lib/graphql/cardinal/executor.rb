@@ -19,25 +19,22 @@ module GraphQL
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object)
-        @schema = schema
+        @query = GraphQL::Query.new(schema, document: document) # << for schema reference
         @resolvers = resolvers
         @document = document
         @root_object = root_object
         @tracer = Tracer.new
         @variables = {}
-        @context = {}
+        @context = { query: @query }
         @data = {}
         @errors = []
         @inline_errors = false
         @path = []
         @exec_queue = []
         @exec_count = 0
-        @non_null_violation = false
       end
 
       def perform
-        @query = GraphQL::Query.new(@schema, document: @document) # << for schema reference
-        @context[:query] = @query
         operation = @query.selected_operation
 
         root_scopes = case operation.operation_type
