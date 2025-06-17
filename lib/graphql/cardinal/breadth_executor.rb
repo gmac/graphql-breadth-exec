@@ -33,15 +33,37 @@ module GraphQL
         @context[:query] = @query
         operation = @query.selected_operation
 
-        @exec_queue << ExecutionScope.new(
-          parent_type: @query.root_type_for_operation(operation.operation_type),
-          selections: operation.selections,
-          sources: [@root_object],
-          responses: [@data],
-        )
+        root_scopes = case operation.operation_type
+        when "query"
+          # query fields can run in parallel
+          [
+            ExecutionScope.new(
+              parent_type: @query.root_type_for_operation(operation.operation_type),
+              selections: operation.selections,
+              sources: [@root_object],
+              responses: [@data],
+            )
+          ]
+        when "mutation"
+          # each mutation field must run serially as its own scope
+          mutation_type = @query.root_type_for_operation(operation.operation_type)
+          execution_fields_by_key(mutation_type, operation.selections).each_value.map do |exec_field|
+            ExecutionScope.new(
+              parent_type: mutation_type,
+              selections: exec_field.nodes,
+              sources: [@root_object],
+              responses: [@data],
+            )
+          end
+        else
+          raise DocumentError.new("Unsupported operation type: #{operation.operation_type}")
+        end
 
-        # execute until no more scopes without using recursion...
-        execute_scope(@exec_queue.shift) until @exec_queue.empty?
+        root_scopes.each do |scope|
+          @exec_queue << scope
+          # execute until no more scopes (without using recursion)...
+          execute_scope(@exec_queue.shift) until @exec_queue.empty?
+        end
 
         @non_null_violation ? Cardinal::Shaper.perform(@query, @data) : @data
       end

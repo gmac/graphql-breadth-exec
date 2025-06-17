@@ -3,18 +3,18 @@
 module GraphQL::Cardinal
   class BreadthExecutor
     class ExecutionField
-      attr_reader :key, :node, :nodes
+      attr_reader :key, :node
       attr_accessor :type
 
       def initialize(key)
-        @key = key
+        @key = key.freeze
         @node = nil
         @nodes = nil
         @arguments = nil
       end
 
       def name
-        @node.name
+        @name ||= @node.name.freeze
       end
 
       def add_node(n)
@@ -25,6 +25,10 @@ module GraphQL::Cardinal
         else
           @nodes << n
         end
+      end
+
+      def nodes
+        @nodes ? @nodes : [@node]
       end
 
       def selections
@@ -39,13 +43,13 @@ module GraphQL::Cardinal
         return EMPTY_OBJECT if @node.arguments.empty?
 
         @arguments ||= @node.arguments.each_with_object({}) do |arg, args|
-          args[arg.name] = coerce_arguments(arg.value, vars)
+          args[arg.name] = build_arguments(arg.value, vars)
         end
       end
 
       private
 
-      def coerce_arguments(value, vars)
+      def build_arguments(value, vars)
         case value
         when GraphQL::Language::Nodes::VariableIdentifier
           vars[value.name] || vars[value.name.to_sym]
@@ -53,10 +57,10 @@ module GraphQL::Cardinal
           nil
         when GraphQL::Language::Nodes::InputObject
           value.arguments.each_with_object({}) do |arg, obj|
-            obj[arg.name] = coerce_arguments(arg.value, vars)
+            obj[arg.name] = build_arguments(arg.value, vars)
           end
         when Array
-          value.map { |item| coerce_arguments(item, vars) }
+          value.map { |item| build_arguments(item, vars) }
         else
           value
         end
