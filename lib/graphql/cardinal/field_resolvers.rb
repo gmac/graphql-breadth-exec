@@ -21,5 +21,12 @@ module GraphQL
         objects.map { _1[@key] }
       end
     end
+
+    class TypenameResolver < FieldResolver
+      def resolve(objects, _args, _ctx, scope)
+        typename = scope.parent_type.graphql_name.freeze
+        objects.map { typename }
+      end
+    end
   end
 end

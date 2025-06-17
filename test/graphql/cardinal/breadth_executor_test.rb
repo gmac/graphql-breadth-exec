@@ -7,6 +7,35 @@ class GraphQL::Cardinal::ExecutorTest < Minitest::Test
     assert_equal BASIC_SOURCE, breadth_exec(BASIC_DOCUMENT, BASIC_SOURCE).dig("data")
   end
 
+  def test_resolves_typename_field
+    document = %|{
+      products(first: 1) {
+        nodes {
+          __typename
+        }
+      }
+      node(id: "Product/1") {
+        __typename
+      }
+    }|
+
+    source = {
+      "products" => {
+        "nodes" => [{}],
+      },
+      "node" => { "__typename__" => "Product" },
+    }
+
+    expected = {
+      "products" => {
+        "nodes" => [{ "__typename" => "Product" }],
+      },
+      "node" => { "__typename" => "Product" },
+    }
+
+    assert_equal expected, breadth_exec(document, source).dig("data")
+  end
+
   def test_follows_skip_directives
     document = %|{
       products(first: 3) {
@@ -70,7 +99,7 @@ class GraphQL::Cardinal::ExecutorTest < Minitest::Test
       "node" => {
         "title" => "Banana",
         "metafield" => { "key" => "test", "value" => "okay" },
-        "__typename" => "Product",
+        "__typename__" => "Product",
       },
     }
 
@@ -105,7 +134,7 @@ class GraphQL::Cardinal::ExecutorTest < Minitest::Test
       "node" => {
         "title" => "Banana",
         "metafield" => { "key" => "test", "value" => "okay" },
-        "__typename" => "Product",
+        "__typename__" => "Product",
       },
     }
 
@@ -127,7 +156,7 @@ class GraphQL::Cardinal::ExecutorTest < Minitest::Test
     }|
 
     source = {
-      "node" => { "id" => "Product/1", "__typename" => "Product" },
+      "node" => { "id" => "Product/1", "__typename__" => "Product" },
     }
 
     expected = {
@@ -151,8 +180,8 @@ class GraphQL::Cardinal::ExecutorTest < Minitest::Test
 
     source = {
       "nodes" => [
-        { "id" => "Product/1", "title" => "Product 1", "__typename" => "Product" },
-        { "id" => "Variant/1", "title" => "Variant 1", "__typename" => "Variant" },
+        { "id" => "Product/1", "title" => "Product 1", "__typename__" => "Product" },
+        { "id" => "Variant/1", "title" => "Variant 1", "__typename__" => "Variant" },
       ],
     }
 
