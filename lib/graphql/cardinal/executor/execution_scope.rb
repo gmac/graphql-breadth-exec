@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module GraphQL::Cardinal
-  class BreadthExecutor
+  class Executor
     class ExecutionScope
       attr_reader :parent_type, :selections, :sources, :responses, :parent
 

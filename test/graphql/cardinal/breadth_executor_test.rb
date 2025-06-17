@@ -2,66 +2,20 @@
 
 require "test_helper"
 
-class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
-  BREADTH_ESOLVERS = {
-    "Node" => {
-      "id" => ->(objs, _args, _ctx) { objs.map { _1["id"] } },
-      "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename"]) },
-    },
-    "HasMetafields" => {
-      "metafield" => ->(objs, args, _ctx) { objs.map { _1["metafield"] } },
-      "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename"]) },
-    },
-    "Metafield" => {
-      "key" => ->(objs, args, _ctx) { objs.map { _1["key"] } },
-      "value" => ->(objs, args, _ctx) { objs.map { _1["value"] } },
-    },
-    "Product" => {
-      "id" => ->(objs, _args, _ctx) { objs.map { _1["id"] } },
-      "title" => ->(objs, _args, _ctx) { objs.map { _1["title"] } },
-      "variants" => ->(objs, _args, _ctx) { objs.map { _1["variants"] } },
-      "metafield" => ->(objs, args, _ctx) { objs.map { _1["metafield"] } },
-    },
-    "ProductConnection" => {
-      "nodes" => ->(objs, _args, _ctx) { objs.map { _1["nodes"] } },
-    },
-    "Variant" => {
-      "id" => ->(objs, _args, _ctx) { objs.map { _1["id"] } },
-      "title" => ->(objs, _args, _ctx) { objs.map { _1["title"] } },
-    },
-    "VariantConnection" => {
-      "nodes" => ->(objs, _args, _ctx) { objs.map { _1["nodes"] } },
-    },
-    "WriteValuePayload" => {
-      "value" => ->(objs, _args, _ctx) { objs.map { _1["value"] } },
-    },
-    "Query" => {
-      "products" => ->(objs, _args, _ctx) { objs.map { _1["products"] } },
-      "nodes" => ->(objs, _args, _ctx) { objs.map { _1["nodes"] } },
-      "node" => ->(objs, _args, _ctx) { objs.map { _1["node"] } },
-    },
-    "Mutation" => {
-      "writeValue" => ->(objs, args, _ctx) {
-        objs.each { _1["writeValue"]["value"] = args["value"] }
-        objs.map { _1["writeValue"] }
-      },
-    },
-  }.freeze
-
+class GraphQL::Cardinal::ExecutorTest < Minitest::Test
   def test_runs
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, DOCUMENT, SOURCE)
-    assert_equal SOURCE, executor.perform
+    assert_equal BASIC_SOURCE, breadth_exec(BASIC_DOCUMENT, BASIC_SOURCE).dig("data")
   end
 
   def test_follows_skip_directives
-    document = GraphQL.parse(%|{
+    document = %|{
       products(first: 3) {
         nodes {
           id
           title @skip(if: true)
         }
       }
-    }|)
+    }|
 
     source = {
       "products" => {
@@ -72,19 +26,18 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       },
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal source, executor.perform
+    assert_equal source, breadth_exec(document, source).dig("data")
   end
 
   def test_follows_include_directives
-    document = GraphQL.parse(%|{
+    document = %|{
       products(first: 3) {
         nodes {
           id
           title @include(if: false)
         }
       }
-    }|)
+    }|
 
     source = {
       "products" => {
@@ -95,12 +48,11 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       },
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal source, executor.perform
+    assert_equal source, breadth_exec(document, source).dig("data")
   end
 
   def test_aggregate_field_access
-    document = GraphQL.parse(%|{
+    document = %|{
       node(id: "Product/1") {
         ... on Product {
           title
@@ -112,7 +64,7 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
           }
         }
       }
-    }|)
+    }|
 
     source = {
       "node" => {
@@ -129,12 +81,11 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       },
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal expected, executor.perform
+    assert_equal expected, breadth_exec(document, source).dig("data")
   end
 
   def test_aggregate_field_access_across_fragments
-    document = GraphQL.parse(%|{
+    document = %|{
       node(id: "Product/1") {
         ... on Product {
           title
@@ -148,7 +99,7 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
           }
         }
       }
-    }|)
+    }|
 
     source = {
       "node" => {
@@ -165,16 +116,15 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       },
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal expected, executor.perform
+    assert_equal expected, breadth_exec(document, source).dig("data")
   end
 
   def test_abstract_type_object_access
-    document = GraphQL.parse(%|{
+    document = %|{
       node(id: "Product/1") {
         ... on Product { id }
       }
-    }|)
+    }|
 
     source = {
       "node" => { "id" => "Product/1", "__typename" => "Product" },
@@ -184,12 +134,11 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       "node" => { "id" => "Product/1" },
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal expected, executor.perform
+    assert_equal expected, breadth_exec(document, source).dig("data")
   end
 
   def test_abstract_type_list_access
-    document = GraphQL.parse(%|{
+    document = %|{
       nodes(ids: ["Product/1", "Variant/1"]) {
         ... on Product {
           id
@@ -198,7 +147,7 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
           title
         }
       }
-    }|)
+    }|
 
     source = {
       "nodes" => [
@@ -214,12 +163,11 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       ],
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal expected, executor.perform
+    assert_equal expected, breadth_exec(document, source).dig("data")
   end
 
   def test_serial_mutations
-    document = GraphQL.parse(%|mutation{
+    document = %|mutation {
       a: writeValue(value: "test1") {
         value
       }
@@ -229,7 +177,7 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       c: writeValue(value: "test3") {
         value
       }
-    }|)
+    }|
 
     source = {
       "writeValue" => { "value" => nil },
@@ -241,7 +189,6 @@ class GraphQL::Cardinal::BreadthExecutorTest < Minitest::Test
       "c" => { "value" => "test3" },
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_ESOLVERS, document, source)
-    assert_equal expected, executor.perform
+    assert_equal expected, breadth_exec(document, source).dig("data")
   end
 end

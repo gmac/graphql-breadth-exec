@@ -1,0 +1,25 @@
+# frozen_string_literal: true
+
+module GraphQL
+  module Cardinal
+    class FieldResolver
+      def authorized?(_ctx)
+        true
+      end
+
+      def resolve(objects, _args, _ctx, _scope)
+        raise NotImplementedError, "Resolver#resolve must be implemented."
+      end
+    end
+
+    class HashKeyResolver < FieldResolver
+      def initialize(key)
+        @key = key
+      end
+
+      def resolve(objects, _args, _ctx, _scope)
+        objects.map { _1[@key] }
+      end
+    end
+  end
+end

@@ -15,6 +15,8 @@ SCHEMA = GraphQL::Schema.from_definition(%|
   type Product implements Node & HasMetafields {
     id: ID!
     title: String
+    maybe: String
+    must: String!
     metafield(key: String!): Metafield
     variants(first: Int!): VariantConnection
   }
@@ -47,10 +49,83 @@ SCHEMA = GraphQL::Schema.from_definition(%|
   }
 |)
 
-DOCUMENT = GraphQL.parse(%|{
+class WriteValueResolver < GraphQL::Cardinal::FieldResolver
+  def resolve(objects, _args, _ctx, _scope)
+    objects.each { _1["writeValue"]["value"] = _args["value"] }
+    objects.map { _1["writeValue"] }
+  end
+end
+
+BREADTH_ESOLVERS = {
+  "Node" => {
+    "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
+    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename"]) },
+  },
+  "HasMetafields" => {
+    "metafield" => GraphQL::Cardinal::HashKeyResolver.new("metafield"),
+    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename"]) },
+  },
+  "Metafield" => {
+    "key" => GraphQL::Cardinal::HashKeyResolver.new("key"),
+    "value" => GraphQL::Cardinal::HashKeyResolver.new("value"),
+  },
+  "Product" => {
+    "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
+    "title" => GraphQL::Cardinal::HashKeyResolver.new("title"),
+    "maybe" => GraphQL::Cardinal::HashKeyResolver.new("maybe"),
+    "must" => GraphQL::Cardinal::HashKeyResolver.new("must"),
+    "variants" => GraphQL::Cardinal::HashKeyResolver.new("variants"),
+    "metafield" => GraphQL::Cardinal::HashKeyResolver.new("metafield"),
+  },
+  "ProductConnection" => {
+    "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
+  },
+  "Variant" => {
+    "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
+    "title" => GraphQL::Cardinal::HashKeyResolver.new("title"),
+  },
+  "VariantConnection" => {
+    "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
+  },
+  "WriteValuePayload" => {
+    "value" => GraphQL::Cardinal::HashKeyResolver.new("value"),
+  },
+  "Query" => {
+    "products" => GraphQL::Cardinal::HashKeyResolver.new("products"),
+    "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
+    "node" => GraphQL::Cardinal::HashKeyResolver.new("node"),
+  },
+  "Mutation" => {
+    "writeValue" => WriteValueResolver.new,
+  },
+}.freeze
+
+DEPTH_RESOLVERS = {
+  "Product" => {
+    "id" => ->(obj) { obj["id"] },
+    "title" => ->(obj) { obj["title"] },
+    "variants" => ->(obj) { obj["variants"] },
+  },
+  "ProductConnection" => {
+    "nodes" => ->(obj) { obj["nodes"] },
+  },
+  "Variant" => {
+    "id" => ->(obj) { obj["id"] },
+    "title" => ->(obj) { obj["title"] },
+  },
+  "VariantConnection" => {
+    "nodes" => ->(obj) { obj["nodes"] },
+  },
+  "Query" => {
+    "products" => ->(obj) { obj["products"] },
+  },
+}.freeze
+
+BASIC_DOCUMENT = %|{
   products(first: 3) {
     nodes {
       id
+      title
       variants(first: 5) {
         nodes {
           id
@@ -59,16 +134,9 @@ DOCUMENT = GraphQL.parse(%|{
       }
     }
   }
-  ... {
-    products(first: 3) {
-      nodes {
-        title
-      }
-    }
-  }
-}|)
+}|
 
-SOURCE = {
+BASIC_SOURCE = {
   "products" => {
     "nodes" => [{
       "id" => "1",
