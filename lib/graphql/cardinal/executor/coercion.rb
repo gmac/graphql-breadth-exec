@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
-module GraphQL
-  module Cardinal
-    module Scalars
+module GraphQL::Cardinal
+  class Executor
+    module Coercion
       def coerce_scalar_value(type, value)
         case type.graphql_name
         when "String"
@@ -18,6 +18,10 @@ module GraphQL
         else
           value
         end
+      end
+
+      def coerce_enum_value(type, value)
+        value
       end
     end
   end

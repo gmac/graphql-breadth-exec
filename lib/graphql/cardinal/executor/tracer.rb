@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module GraphQL::Cardinal
-  class BreadthExecutor
+  class Executor
     class Tracer
       def initialize
         @time = nil

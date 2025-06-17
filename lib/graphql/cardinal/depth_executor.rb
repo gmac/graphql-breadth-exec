@@ -1,9 +1,11 @@
 # frozen_string_literal: true
 
+require_relative "./executor/coercion"
+
 module GraphQL
   module Cardinal
     class DepthExecutor
-      include Scalars
+      include GraphQL::Cardinal::Executor::Coercion
 
       attr_reader :exec_count
 
@@ -19,7 +21,9 @@ module GraphQL
         @query = GraphQL::Query.new(@schema, document: @document) # << for schema reference
         operation = @query.selected_operation
         parent_type = @query.root_type_for_operation(operation.operation_type)
-        exec_object_scope(parent_type, operation.selections, @root_object, path: [])
+        {
+          "data" => exec_object_scope(parent_type, operation.selections, @root_object, path: []),
+        }
       end
 
       private

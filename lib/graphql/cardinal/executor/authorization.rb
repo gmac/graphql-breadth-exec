@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module GraphQL::Cardinal
-  class BreadthExecutor
+  class Executor
     class Authorization
       class << self
         def can_access_type?(type, context)

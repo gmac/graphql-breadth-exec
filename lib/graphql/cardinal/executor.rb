@@ -1,14 +1,18 @@
 # frozen_string_literal: true
 
-require_relative "./breadth_executor/execution_scope"
-require_relative "./breadth_executor/execution_field"
-require_relative "./breadth_executor/authorization"
-require_relative "./breadth_executor/tracer"
+require_relative "./executor/execution_scope"
+require_relative "./executor/execution_field"
+require_relative "./executor/authorization"
+require_relative "./executor/tracer"
+require_relative "./executor/coercion"
+require_relative "./executor/response_hash"
+require_relative "./executor/response_shape"
 
 module GraphQL
   module Cardinal
-    class BreadthExecutor
-      include Scalars
+    class Executor
+      include Coercion
+      include ResponseShape
 
       attr_reader :exec_count
 
@@ -22,6 +26,7 @@ module GraphQL
         @context = {}
         @data = {}
         @errors = []
+        @inline_errors = false
         @path = []
         @exec_queue = []
         @exec_count = 0
@@ -65,7 +70,11 @@ module GraphQL
           execute_scope(@exec_queue.shift) until @exec_queue.empty?
         end
 
-        @non_null_violation ? Cardinal::Shaper.perform(@query, @data) : @data
+        response = {
+          "data" => @inline_errors ? shape_response(@data) : @data,
+        }
+        response["errors"] = @errors.map(&:to_h) unless @errors.empty?
+        response
       end
 
       private
@@ -77,20 +86,29 @@ module GraphQL
           parent_type = exec_scope.parent_type
           parent_sources = exec_scope.sources
           field_name = exec_field.name
-          exec_field.type = @query.get_field(parent_type, field_name).type
 
-          resolved_sources = if !Authorization.can_access_field?(parent_type, field_name, @context)
-            Array.new(parent_sources.length, AuthorizationError.new)
-          elsif !Authorization.can_access_type?(exec_field.type.unwrap, @context)
-            Array.new(parent_sources.length, AuthorizationError.new)
+          exec_field.type = @query.get_field(parent_type, field_name).type
+          value_type = exec_field.type.unwrap
+
+          field_resolver = @resolvers.dig(parent_type.graphql_name, field_name)
+          unless field_resolver
+            raise NotImplementedError, "No field resolver for `#{parent_type.graphql_name}.#{field_name}`"
+          end
+
+          resolved_sources = if !field_resolver.authorized?(@context)
+            @errors << AuthorizationError.new(type_name: parent_type.graphql_name, field_name: field_name, path: @path.dup)
+            Array.new(parent_sources.length, nil)
+          elsif !Authorization.can_access_type?(value_type, @context)
+            @errors << AuthorizationError.new(type_name: value_type.graphql_name, path: @path.dup)
+            Array.new(parent_sources.length, nil)
           else
             begin
               @tracer&.before_resolve_field(parent_type, field_name, parent_sources.length, @context)
-              field_resolver = @resolvers.dig(parent_type.graphql_name, field_name)
-              field_resolver.call(parent_sources, exec_field.arguments(@variables), @context)
+              field_resolver.resolve(parent_sources, exec_field.arguments(@variables), @context, exec_scope)
             rescue StandardError => e
-              @errors << InternalError.new(e.message)
-              Array.new(parent_sources.length, InternalError.new(e.message))
+              report_exception(e.message)
+              @errors << InternalError.new(e.message, path: @path.dup)
+              Array.new(parent_sources.length, nil)
             ensure
               @tracer&.after_resolve_field(parent_type, field_name, parent_sources.length, @context)
               @exec_count += 1
@@ -125,7 +143,10 @@ module GraphQL
         field_type = exec_field.type
         return_type = field_type.unwrap
 
-        raise InternalError, "Incorrect results" if resolved_sources.length != parent_sources.length
+        if resolved_sources.length != parent_sources.length
+          report_exception("Incorrect number of results resolved. Expected #{parent_sources.length}, got #{resolved_sources.length}")
+          resolved_sources = Array.new(parent_sources.length, nil)
+        end
 
         if return_type.kind.composite?
           # build results with child selections
@@ -137,18 +158,23 @@ module GraphQL
 
           if return_type.kind.abstract?
             type_resolver = @resolvers.dig(return_type.graphql_name, "__type__")
+            unless type_resolver
+              raise NotImplementedError, "No type resolver for `#{return_type.graphql_name}`"
+            end
+
             next_sources_by_type = Hash.new { |h, k| h[k] = [] }
             next_responses_by_type = Hash.new { |h, k| h[k] = [] }
             next_sources.each_with_index do |source, i|
               impl_type = type_resolver.call(source, @context)
               next_sources_by_type[impl_type] << source
-              next_responses_by_type[impl_type] << next_responses[i]
+              next_responses_by_type[impl_type] << next_responses[i].tap { |r| r.typename = impl_type.graphql_name }
             end
 
             next_sources_by_type.each do |impl_type, impl_type_sources|
               # check concrete type access only once per resolved type...
               unless Authorization.can_access_type?(impl_type, @context)
-                impl_type_sources = Array.new(impl_type_sources.length, AuthorizationError.new)
+                @errors << AuthorizationError.new(type_name: impl_type.graphql_name, path: @path.dup)
+                impl_type_sources = Array.new(impl_type_sources.length, AuthorizationError.new(path: @path.dup))
               end
 
               @exec_queue << ExecutionScope.new(
@@ -172,9 +198,11 @@ module GraphQL
           # build leaf results
           resolved_sources.each_with_index do |val, i|
             parent_responses[i][field_key] = if val.nil? || val.is_a?(StandardError)
-              handle_missing_value(field_type, val)
+              build_missing_value(field_type, val)
             elsif return_type.kind.scalar?
-              coerce_scalar_value(field_type, val)
+              coerce_scalar_value(return_type, val)
+            elsif return_type.kind.enum?
+              coerce_enum_value(return_type, val)
             else
               val
             end
@@ -186,10 +214,14 @@ module GraphQL
         # if object authorization check implemented, then...
         # unless Authorization.can_access_object?(return_type, source, @context)
 
-        if source.nil? || source.is_a?(StandardError)
-          handle_missing_value(field_type, source)
+        if source.nil? || source.is_a?(ExecutionError)
+          build_missing_value(field_type, source)
         elsif field_type.list?
-          # error if not array...
+          unless source.is_a?(Array)
+            report_exception("Incorrect result for list field. Expected Array, got #{source.class}")
+            return build_missing_value(field_type, nil)
+          end
+
           field_type = field_type.of_type while field_type.non_null?
 
           source.map do |src|
@@ -197,21 +229,24 @@ module GraphQL
           end
         else
           next_sources << source
-          next_responses << {}
+          next_responses << ResponseHash.new
           next_responses.last
         end
       end
 
-      def handle_missing_value(field_type, val)
-        is_error = !!val
-        if is_error
-          # do something...?
-        end
+      def build_missing_value(field_type, val)
         if field_type.non_null?
-          @non_null_violation = true
-          # format error if val (error)...
+          # upgrade nil in non-null positions to an error
+          val = InvalidNullError.new(path: @path.dup, original_error: val)
         end
-        nil
+
+        if val
+          # assure all errors have paths, and note inline error additions
+          val = val.path ? val : ExecutionError.new(val.message, path: @path.dup)
+          @inline_errors = true
+        end
+
+        val
       end
 
       def execution_fields_by_key(parent_type, selections, map: Hash.new { |h, k| h[k] = ExecutionField.new(k) })
@@ -262,6 +297,12 @@ module GraphQL
           bool_arg.value
         end
       end
+
+      def report_exception(message, path: @path.dup)
+        # todo: hook up some kind of error reporting...
+      end
     end
+
+    class BreadthExecutor < Executor; end
   end
 end

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 module GraphQL::Cardinal
-  class BreadthExecutor
+  class Executor
     class ExecutionField
       attr_reader :key, :node
       attr_accessor :type
