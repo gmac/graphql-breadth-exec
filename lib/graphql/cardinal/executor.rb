@@ -14,6 +14,8 @@ module GraphQL
       include Coercion
       include ResponseShape
 
+      TYPENAME_FIELD = "__typename"
+
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object)
@@ -140,6 +142,7 @@ module GraphQL
         parent_sources = exec_scope.sources
         parent_responses = exec_scope.responses
         field_key = exec_field.key
+        field_name = exec_field.name
         field_type = exec_field.type
         return_type = field_type.unwrap
 
@@ -166,7 +169,7 @@ module GraphQL
             next_responses_by_type = Hash.new { |h, k| h[k] = [] }
             next_sources.each_with_index do |source, i|
               impl_type = type_resolver.call(source, @context)
-              next_sources_by_type[impl_type] << source
+              next_sources_by_type[impl_type] << (field_name == TYPENAME_FIELD ? impl_type.graphql_name : source)
               next_responses_by_type[impl_type] << next_responses[i].tap { |r| r.typename = impl_type.graphql_name }
             end
 
