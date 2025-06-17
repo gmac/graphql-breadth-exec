@@ -56,7 +56,7 @@ class WriteValueResolver < GraphQL::Cardinal::FieldResolver
   end
 end
 
-BREADTH_ESOLVERS = {
+BREADTH_RESOLVERS = {
   "Node" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
     "__typename" => GraphQL::Cardinal::TypenameResolver.new,
