@@ -4,13 +4,14 @@ module GraphQL::Cardinal
   class Executor
     class ExecutionField
       attr_reader :key, :node
-      attr_accessor :type
+      attr_accessor :type, :promise
 
       def initialize(key)
         @key = key.freeze
         @node = nil
         @nodes = nil
         @arguments = nil
+        @promise = nil
       end
 
       def name

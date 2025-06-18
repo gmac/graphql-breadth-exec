@@ -43,10 +43,13 @@ module GraphQL
         end
       end
 
-      def then(on_fulfilled = nil, on_rejected = nil)
+      def then(on_fulfilled = nil, on_rejected = nil, &block)
+        raise ArgumentError, "Either on_fulfilled or block is required" unless on_fulfilled || block_given?
+        raise ArgumentError, "Exactly one of on_fulfilled or block is required" if on_fulfilled && block_given?
+
         Promise.new do |resolve, reject|
           handle_then(
-            on_fulfilled || ->(value) { value },
+            on_fulfilled || block,
             on_rejected || ->(reason) { raise reason },
             resolve,
             reject
@@ -78,6 +81,8 @@ module GraphQL
         @reason if rejected?
       end
 
+      private
+
       def resolve(value)
         return unless pending?
 
@@ -97,8 +102,6 @@ module GraphQL
         @on_fulfilled.clear
         @on_rejected.clear
       end
-
-      private
 
       def handle_then(on_fulfilled, on_rejected, resolve, reject)
         if resolved?

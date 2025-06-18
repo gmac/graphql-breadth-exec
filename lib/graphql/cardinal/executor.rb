@@ -4,40 +4,39 @@ require_relative "./executor/execution_scope"
 require_relative "./executor/execution_field"
 require_relative "./executor/authorization"
 require_relative "./executor/tracer"
-require_relative "./executor/coercion"
+require_relative "./executor/hot_paths"
 require_relative "./executor/response_hash"
 require_relative "./executor/response_shape"
 
 module GraphQL
   module Cardinal
     class Executor
-      include Coercion
+      include HotPaths
       include ResponseShape
 
       TYPENAME_FIELD = "__typename"
+      TYPENAME_FIELD_RESOLVER = TypenameResolver.new
 
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object)
-        @schema = schema
+        @query = GraphQL::Query.new(schema, document: document) # << for schema reference
         @resolvers = resolvers
         @document = document
         @root_object = root_object
         @tracer = Tracer.new
         @variables = {}
-        @context = {}
+        @context = { query: @query }
         @data = {}
         @errors = []
         @inline_errors = false
+        @unordered_keys = false
         @path = []
         @exec_queue = []
         @exec_count = 0
-        @non_null_violation = false
       end
 
       def perform
-        @query = GraphQL::Query.new(@schema, document: @document) # << for schema reference
-        @context[:query] = @query
         operation = @query.selected_operation
 
         root_scopes = case operation.operation_type
@@ -73,7 +72,7 @@ module GraphQL
         end
 
         response = {
-          "data" => @inline_errors ? shape_response(@data) : @data,
+          "data" => @inline_errors || @unordered_keys ? shape_response(@data) : @data,
         }
         response["errors"] = @errors.map(&:to_h) unless @errors.empty?
         response
@@ -82,57 +81,74 @@ module GraphQL
       private
 
       def execute_scope(exec_scope)
-        lazy_execution_fields = []
-        execution_fields_by_key(exec_scope.parent_type, exec_scope.selections).each_value do |exec_field|
-          @path.push(exec_field.key)
-          parent_type = exec_scope.parent_type
-          parent_sources = exec_scope.sources
-          field_name = exec_field.name
+        unless exec_scope.fields
+          exec_scope.fields = execution_fields_by_key(exec_scope.parent_type, exec_scope.selections)
+          exec_scope.fields.each_value do |exec_field|
+            @path.push(exec_field.key)
+            parent_type = exec_scope.parent_type
+            parent_sources = exec_scope.sources
+            field_name = exec_field.name
 
-          exec_field.type = @query.get_field(parent_type, field_name).type
-          value_type = exec_field.type.unwrap
+            exec_field.type = @query.get_field(parent_type, field_name).type
+            value_type = exec_field.type.unwrap
 
-          field_resolver = @resolvers.dig(parent_type.graphql_name, field_name)
-          unless field_resolver
-            raise NotImplementedError, "No field resolver for `#{parent_type.graphql_name}.#{field_name}`"
-          end
-
-          resolved_sources = if !field_resolver.authorized?(@context)
-            @errors << AuthorizationError.new(type_name: parent_type.graphql_name, field_name: field_name, path: @path.dup)
-            Array.new(parent_sources.length, nil)
-          elsif !Authorization.can_access_type?(value_type, @context)
-            @errors << AuthorizationError.new(type_name: value_type.graphql_name, path: @path.dup)
-            Array.new(parent_sources.length, nil)
-          else
-            begin
-              @tracer&.before_resolve_field(parent_type, field_name, parent_sources.length, @context)
-              field_resolver.resolve(parent_sources, exec_field.arguments(@variables), @context, exec_scope)
-            rescue StandardError => e
-              report_exception(e.message)
-              @errors << InternalError.new(e.message, path: @path.dup)
-              Array.new(parent_sources.length, nil)
-            ensure
-              @tracer&.after_resolve_field(parent_type, field_name, parent_sources.length, @context)
-              @exec_count += 1
+            field_resolver = @resolvers.dig(parent_type.graphql_name, field_name)
+            unless field_resolver
+              if field_name == TYPENAME_FIELD
+                field_resolver = TYPENAME_FIELD_RESOLVER
+              else
+                raise NotImplementedError, "No field resolver for `#{parent_type.graphql_name}.#{field_name}`"
+              end
             end
-          end
 
-          if resolved_sources.is_a?(Promise)
-            resolved_sources.source = exec_field
-            lazy_execution_fields << resolved_sources
-          else
-            resolve_execution_field(exec_scope, exec_field, resolved_sources)
+            resolved_sources = if !field_resolver.authorized?(@context)
+              @errors << AuthorizationError.new(type_name: parent_type.graphql_name, field_name: field_name, path: @path.dup)
+              Array.new(parent_sources.length, nil)
+            elsif !Authorization.can_access_type?(value_type, @context)
+              @errors << AuthorizationError.new(type_name: value_type.graphql_name, path: @path.dup)
+              Array.new(parent_sources.length, nil)
+            else
+              begin
+                @tracer&.before_resolve_field(parent_type, field_name, parent_sources.length, @context)
+                field_resolver.resolve(parent_sources, exec_field.arguments(@variables), @context, exec_scope)
+              rescue StandardError => e
+                raise e
+                report_exception(e.message)
+                @errors << InternalError.new(e.message, path: @path.dup)
+                Array.new(parent_sources.length, nil)
+              ensure
+                @tracer&.after_resolve_field(parent_type, field_name, parent_sources.length, @context)
+                @exec_count += 1
+              end
+            end
+
+            if resolved_sources.is_a?(Promise)
+              exec_field.promise = resolved_sources
+            else
+              resolve_execution_field(exec_scope, exec_field, resolved_sources)
+            end
+
+            @path.pop
           end
-          @path.pop
         end
 
-        # --- RUN LAZY CALLBACKS!!
+        if exec_scope.lazy_fields_pending?
+          if exec_scope.lazy_fields_ready?
+            exec_scope.method(:lazy_exec!).call # << noop for loaders that have already run
+            exec_scope.fields.each_value do |exec_field|
+              next unless exec_field.promise
 
-        lazy_execution_fields.each do |promise|
-          exec_field = promise.source
-          @path.push(exec_field.key)
-          resolve_execution_field(exec_scope, exec_field, promise.value)
-          @path.pop
+              @path.push(exec_field.key)
+              resolve_execution_field(exec_scope, exec_field, exec_field.promise.value)
+              @path.pop
+
+              # could be smarter about tracking key order and checking if we got it right...
+              @unordered_keys = true
+            end
+          else
+            # requeue the scope to wait on others that haven't built fields yet
+            @exec_queue << exec_scope
+          end
         end
 
         nil
@@ -156,6 +172,7 @@ module GraphQL
           next_sources = []
           next_responses = []
           resolved_sources.each_with_index do |source, i|
+            # DANGER: HOT PATH!
             parent_responses[i][field_key] = build_composite_response(field_type, source, next_sources, next_responses)
           end
 
@@ -168,26 +185,33 @@ module GraphQL
             next_sources_by_type = Hash.new { |h, k| h[k] = [] }
             next_responses_by_type = Hash.new { |h, k| h[k] = [] }
             next_sources.each_with_index do |source, i|
+              # DANGER: HOT PATH!
               impl_type = type_resolver.call(source, @context)
               next_sources_by_type[impl_type] << (field_name == TYPENAME_FIELD ? impl_type.graphql_name : source)
               next_responses_by_type[impl_type] << next_responses[i].tap { |r| r.typename = impl_type.graphql_name }
             end
 
+            loader_cache = {} # << all scopes in the abstract generation share a loader cache
+            loader_group = []
             next_sources_by_type.each do |impl_type, impl_type_sources|
               # check concrete type access only once per resolved type...
               unless Authorization.can_access_type?(impl_type, @context)
                 @errors << AuthorizationError.new(type_name: impl_type.graphql_name, path: @path.dup)
-                impl_type_sources = Array.new(impl_type_sources.length, AuthorizationError.new(path: @path.dup))
+                impl_type_sources = Array.new(impl_type_sources.length, nil)
               end
 
-              @exec_queue << ExecutionScope.new(
+              loader_group << ExecutionScope.new(
                 parent_type: impl_type,
                 selections: exec_field.selections,
                 sources: impl_type_sources,
                 responses: next_responses_by_type[impl_type],
+                loader_cache: loader_cache,
+                loader_group: loader_group,
                 parent: exec_scope,
               )
             end
+
+            @exec_queue.concat(loader_group)
           else
             @exec_queue << ExecutionScope.new(
               parent_type: return_type,
@@ -200,6 +224,7 @@ module GraphQL
         else
           # build leaf results
           resolved_sources.each_with_index do |val, i|
+            # DANGER: HOT PATH!
             parent_responses[i][field_key] = if val.nil? || val.is_a?(StandardError)
               build_missing_value(field_type, val)
             elsif return_type.kind.scalar?
@@ -211,45 +236,6 @@ module GraphQL
             end
           end
         end
-      end
-
-      def build_composite_response(field_type, source, next_sources, next_responses)
-        # if object authorization check implemented, then...
-        # unless Authorization.can_access_object?(return_type, source, @context)
-
-        if source.nil? || source.is_a?(ExecutionError)
-          build_missing_value(field_type, source)
-        elsif field_type.list?
-          unless source.is_a?(Array)
-            report_exception("Incorrect result for list field. Expected Array, got #{source.class}")
-            return build_missing_value(field_type, nil)
-          end
-
-          field_type = field_type.of_type while field_type.non_null?
-
-          source.map do |src|
-            build_composite_response(field_type.of_type, src, next_sources, next_responses)
-          end
-        else
-          next_sources << source
-          next_responses << ResponseHash.new
-          next_responses.last
-        end
-      end
-
-      def build_missing_value(field_type, val)
-        if field_type.non_null?
-          # upgrade nil in non-null positions to an error
-          val = InvalidNullError.new(path: @path.dup, original_error: val)
-        end
-
-        if val
-          # assure all errors have paths, and note inline error additions
-          val = val.path ? val : ExecutionError.new(val.message, path: @path.dup)
-          @inline_errors = true
-        end
-
-        val
       end
 
       def execution_fields_by_key(parent_type, selections, map: Hash.new { |h, k| h[k] = ExecutionField.new(k) })
