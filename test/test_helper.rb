@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-$LOAD_PATH.unshift File.expand_path('../../lib', __FILE__)
-
 require 'warning'
 Gem.path.each do |path|
   # ignore warnings from auto-generated GraphQL lib code.
@@ -15,7 +13,9 @@ Bundler.require(:default, :test)
 require 'minitest/pride'
 require 'minitest/autorun'
 require 'minitest/stub_const'
+
 require 'graphql/cardinal'
+require 'graphql/batch'
 require_relative './fixtures'
 
 def breadth_exec(query, source, variables: {}, context: {})
