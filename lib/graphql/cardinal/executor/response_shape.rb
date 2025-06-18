@@ -26,7 +26,9 @@ module GraphQL::Cardinal
             begin
               node_type = @query.get_field(parent_type, node.name).type
               named_type = node_type.unwrap
-              raw_value = raw_object[field_name]
+
+              # delete and re-add to order result keys...
+              raw_value = raw_object.delete(field_name)
 
               raw_object[field_name] = if raw_value.is_a?(ExecutionError)
                 # capture errors encountered in the response with proper path
@@ -114,7 +116,7 @@ module GraphQL::Cardinal
       def typename_in_type?(typename, type)
         return true if type.graphql_name == typename
 
-        type.kind.abstract? && @@query.possible_types(type).any? do |t|
+        type.kind.abstract? && @query.possible_types(type).any? do |t|
           t.graphql_name == typename
         end
       end

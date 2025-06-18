@@ -59,18 +59,15 @@ end
 BREADTH_RESOLVERS = {
   "Node" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
     "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
   },
   "HasMetafields" => {
     "metafield" => GraphQL::Cardinal::HashKeyResolver.new("metafield"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
     "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
   },
   "Metafield" => {
     "key" => GraphQL::Cardinal::HashKeyResolver.new("key"),
     "value" => GraphQL::Cardinal::HashKeyResolver.new("value"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "Product" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
@@ -79,34 +76,27 @@ BREADTH_RESOLVERS = {
     "must" => GraphQL::Cardinal::HashKeyResolver.new("must"),
     "variants" => GraphQL::Cardinal::HashKeyResolver.new("variants"),
     "metafield" => GraphQL::Cardinal::HashKeyResolver.new("metafield"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "ProductConnection" => {
     "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "Variant" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
     "title" => GraphQL::Cardinal::HashKeyResolver.new("title"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "VariantConnection" => {
     "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "WriteValuePayload" => {
     "value" => GraphQL::Cardinal::HashKeyResolver.new("value"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "Query" => {
     "products" => GraphQL::Cardinal::HashKeyResolver.new("products"),
     "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
     "node" => GraphQL::Cardinal::HashKeyResolver.new("node"),
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
   "Mutation" => {
     "writeValue" => WriteValueResolver.new,
-    "__typename" => GraphQL::Cardinal::TypenameResolver.new,
   },
 }.freeze
 

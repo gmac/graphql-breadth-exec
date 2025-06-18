@@ -1,11 +1,11 @@
 # frozen_string_literal: true
 
-require_relative "./executor/coercion"
+require_relative "./executor/hot_paths"
 
 module GraphQL
   module Cardinal
     class DepthExecutor
-      include GraphQL::Cardinal::Executor::Coercion
+      include GraphQL::Cardinal::Executor::HotPaths
 
       attr_reader :exec_count
 
