@@ -33,4 +33,6 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency 'minitest', '~> 5.12'
   spec.add_development_dependency 'benchmark-ips', '~> 2.0'
   spec.add_development_dependency 'memory_profiler'
+  spec.add_development_dependency 'debug'
+  spec.add_development_dependency 'graphql-batch'
 end

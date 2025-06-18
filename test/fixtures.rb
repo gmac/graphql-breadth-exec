@@ -74,6 +74,26 @@ class DeferredHashResolver < GraphQL::Cardinal::FieldResolver
   end
 end
 
+class SimpleHashSource < GraphQL::Dataloader::Source
+  def initialize(hash)
+    @hash = hash
+  end
+
+  def fetch(keys)
+    [@hash.fetch(keys.first)]
+  end
+end
+
+class SimpleHashBatchLoader < GraphQL::Batch::Loader
+  def initialize(hash)
+    @hash = hash
+  end
+
+  def perform(keys)
+    keys.each { |key| fulfill(key, @hash.fetch(key)) }
+  end
+end
+
 BREADTH_RESOLVERS = {
   "Node" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
@@ -222,6 +242,48 @@ GEM_LAZY_RESOLVERS = {
   },
   "Query" => {
     "products" => ->(obj, args, ctx) { -> { obj["products"] } },
+  },
+}.freeze
+
+GEM_DATALOADER_RESOLVERS = {
+  "Product" => {
+    "id" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("id") },
+    "title" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("title") },
+    "variants" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("variants") },
+  },
+  "ProductConnection" => {
+    "nodes" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("nodes") },
+  },
+  "Variant" => {
+    "id" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("id") },
+    "title" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("title") },
+  },
+  "VariantConnection" => {
+    "nodes" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("nodes") },
+  },
+  "Query" => {
+    "products" => ->(obj, args, ctx) { ctx.dataloader.with(SimpleHashSource, obj).load("products") },
+  },
+}.freeze
+
+GEM_BATCH_LOADER_RESOLVERS = {
+  "Product" => {
+    "id" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("id") },
+    "title" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("title") },
+    "variants" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("variants") },
+  },
+  "ProductConnection" => {
+    "nodes" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("nodes") },
+  },
+  "Variant" => {
+    "id" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("id") },
+    "title" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("title") },
+  },
+  "VariantConnection" => {
+    "nodes" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("nodes") },
+  },
+  "Query" => {
+    "products" => ->(obj, args, ctx) { SimpleHashBatchLoader.for(obj).load("products") },
   },
 }.freeze
 

@@ -15,6 +15,7 @@ require 'minitest/autorun'
 require 'minitest/stub_const'
 
 require 'graphql/cardinal'
+require 'graphql/batch'
 require_relative './fixtures'
 
 def breadth_exec(query, source, variables: {}, context: {})

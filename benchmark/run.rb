@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 #
+require "debug"
 require "graphql"
+require "graphql/batch"
 require "graphql/cardinal"
 
 require "benchmark/ips"
@@ -15,8 +17,21 @@ class GraphQLBenchmark
     lazy_resolve(Proc, :call)
   end
 
+  class DataloaderSchema < GraphQL::Schema
+    use GraphQL::Dataloader
+  end
+
+  class BatchLoaderSchema < GraphQL::Schema
+    use GraphQL::Batch
+  end
+
   GRAPHQL_GEM_SCHEMA = Schema.from_definition(SDL, default_resolve: GEM_RESOLVERS)
   GRAPHQL_GEM_LAZY_SCHEMA = Schema.from_definition(SDL, default_resolve: GEM_LAZY_RESOLVERS)
+  GRAPHQL_GEM_DATALOADER_SCHEMA = DataloaderSchema.from_definition(SDL, default_resolve: GEM_DATALOADER_RESOLVERS)
+  GRAPHQL_GEM_DATALOADER_SCHEMA.use(GraphQL::Dataloader)
+
+  GRAPHQL_GEM_BATCH_LOADER_SCHEMA = BatchLoaderSchema.from_definition(SDL, default_resolve: GEM_BATCH_LOADER_RESOLVERS)
+  GRAPHQL_GEM_BATCH_LOADER_SCHEMA.use(GraphQL::Batch)
 
   class << self
     def benchmark_execution
@@ -49,11 +64,19 @@ class GraphQLBenchmark
 
       with_data_sizes(sizes) do |data_source, num_objects|
         Benchmark.ips do |x|
-          x.report("graphql-ruby: #{num_objects} lazy resolvers") do
+          x.report("graphql-ruby lazy: #{num_objects} resolvers") do
             GRAPHQL_GEM_LAZY_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
           end
 
-          x.report("graphql-cardinal #{num_objects} lazy resolvers") do
+          x.report("graphql-ruby dataloader: #{num_objects} resolvers") do
+            GRAPHQL_GEM_DATALOADER_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          end
+
+          x.report("graphql-ruby batch: #{num_objects} resolvers") do
+            GRAPHQL_GEM_BATCH_LOADER_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          end
+
+          x.report("graphql-cardinal: #{num_objects} lazy resolvers") do
             GraphQL::Cardinal::Executor.new(
               SCHEMA,
               BREADTH_DEFERRED_RESOLVERS,
