@@ -10,7 +10,13 @@ require_relative '../test/fixtures'
 class GraphQLBenchmark
   DOCUMENT = GraphQL.parse(BASIC_DOCUMENT)
   CARDINAL_SCHEMA = SCHEMA
-  GRAPHQL_GEM_SCHEMA = GraphQL::Schema.from_definition(SDL, default_resolve: GEM_RESOLVERS)
+
+  class Schema < GraphQL::Schema
+    lazy_resolve(Proc, :call)
+  end
+
+  GRAPHQL_GEM_SCHEMA = Schema.from_definition(SDL, default_resolve: GEM_RESOLVERS)
+  GRAPHQL_GEM_LAZY_SCHEMA = Schema.from_definition(SDL, default_resolve: GEM_LAZY_RESOLVERS)
 
   class << self
     def benchmark_execution
@@ -27,6 +33,30 @@ class GraphQLBenchmark
             GraphQL::Cardinal::Executor.new(
               SCHEMA,
               BREADTH_RESOLVERS,
+              DOCUMENT,
+              data_source
+            ).perform
+          end
+
+          x.compare!
+        end
+      end
+    end
+
+    def benchmark_lazy_execution
+      default_data_sizes = "10, 100, 1000, 10000"
+      sizes = ENV.fetch("SIZES", default_data_sizes).split(",").map(&:to_i)
+
+      with_data_sizes(sizes) do |data_source, num_objects|
+        Benchmark.ips do |x|
+          x.report("graphql-ruby: #{num_objects} lazy resolvers") do
+            GRAPHQL_GEM_LAZY_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          end
+
+          x.report("graphql-cardinal #{num_objects} lazy resolvers") do
+            GraphQL::Cardinal::Executor.new(
+              SCHEMA,
+              BREADTH_DEFERRED_RESOLVERS,
               DOCUMENT,
               data_source
             ).perform
