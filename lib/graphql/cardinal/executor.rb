@@ -30,7 +30,6 @@ module GraphQL
         @data = {}
         @errors = []
         @inline_errors = false
-        @unordered_keys = false
         @path = []
         @exec_queue = []
         @exec_count = 0
@@ -72,7 +71,7 @@ module GraphQL
         end
 
         response = {
-          "data" => @inline_errors || @unordered_keys ? shape_response(@data) : @data,
+          "data" => @inline_errors ? shape_response(@data) : @data,
         }
         response["errors"] = @errors.map(&:to_h) unless @errors.empty?
         response
@@ -82,6 +81,7 @@ module GraphQL
 
       def execute_scope(exec_scope)
         unless exec_scope.fields
+          lazy_field_keys = []
           exec_scope.fields = execution_fields_by_key(exec_scope.parent_type, exec_scope.selections)
           exec_scope.fields.each_value do |exec_field|
             @path.push(exec_field.key)
@@ -124,8 +124,10 @@ module GraphQL
 
             if resolved_sources.is_a?(Promise)
               exec_field.promise = resolved_sources
+              lazy_field_keys << exec_field.key
             else
-              resolve_execution_field(exec_scope, exec_field, resolved_sources)
+              resolve_execution_field(exec_scope, exec_field, resolved_sources, lazy_field_keys)
+              lazy_field_keys.clear
             end
 
             @path.pop
@@ -141,9 +143,6 @@ module GraphQL
               @path.push(exec_field.key)
               resolve_execution_field(exec_scope, exec_field, exec_field.promise.value)
               @path.pop
-
-              # could be smarter about tracking key order and checking if we got it right...
-              @unordered_keys = true
             end
           else
             # requeue the scope to wait on others that haven't built fields yet
@@ -154,7 +153,7 @@ module GraphQL
         nil
       end
 
-      def resolve_execution_field(exec_scope, exec_field, resolved_sources)
+      def resolve_execution_field(exec_scope, exec_field, resolved_sources, lazy_field_keys = nil)
         parent_sources = exec_scope.sources
         parent_responses = exec_scope.responses
         field_key = exec_field.key
@@ -173,7 +172,9 @@ module GraphQL
           next_responses = []
           resolved_sources.each_with_index do |source, i|
             # DANGER: HOT PATH!
-            parent_responses[i][field_key] = build_composite_response(field_type, source, next_sources, next_responses)
+            response = parent_responses[i]
+            lazy_field_keys.each { |k| response[k] = nil } if lazy_field_keys && !lazy_field_keys.empty?
+            response[field_key] = build_composite_response(field_type, source, next_sources, next_responses)
           end
 
           if return_type.kind.abstract?
