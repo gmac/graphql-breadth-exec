@@ -67,7 +67,7 @@ class GraphQL::Cardinal::Executor::ErrorsTest < Minitest::Test
         },
       },
       "errors" => [{
-        "message" => "Cannot resolve value",
+        "message" => "Failed to resolve expected value",
         "path" => ["products", "nodes", 1, "must"],
       }, {
         "message" => "An unknown error occurred",

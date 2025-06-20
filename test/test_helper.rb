@@ -18,7 +18,14 @@ require 'graphql/cardinal'
 require 'graphql/batch'
 require_relative './fixtures'
 
-def breadth_exec(query, source, variables: {}, context: {})
-  executor = GraphQL::Cardinal::Executor.new(SCHEMA, BREADTH_RESOLVERS, GraphQL.parse(query), source)
-  executor.perform
+def breadth_exec(query, source, variables: {}, context: {}, tracers: [GraphQL::Cardinal::Tracer.new])
+  GraphQL::Cardinal::Executor.new(
+    SCHEMA,
+    BREADTH_RESOLVERS,
+    GraphQL.parse(query),
+    source,
+    tracers: tracers,
+    variables: variables,
+    context: context,
+  ).perform
 end

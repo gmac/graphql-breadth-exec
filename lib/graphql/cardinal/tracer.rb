@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
-module GraphQL::Cardinal
-  class Executor
+module GraphQL
+  module Cardinal
     class Tracer
       def initialize
         @time = nil

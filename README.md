@@ -1,6 +1,6 @@
 ![Cardinal](./images/cardinal.png)
 
-**An (experimental) breadth-first GraphQL executor for Ruby**
+**An (experimental) breadth-first GraphQL executor written in Ruby**
 
 Depth-first execution resolves every object field descending down a response tree, while breadth-first visits every _selection position_ once with an aggregated set of objects. The breadth-first approach is much faster due to fewer resolver calls and intermediary promises.
 
@@ -45,3 +45,70 @@ While bigger responses will always take longer to process, the workload is your 
 
 * Eliminates boilerplate need for DataLoader promises, because resolvers are inherently batched.
 * Executes via flat queuing without deep recursion and large call stacks.
+
+## API
+
+Setup a `GraphQL::Cardinal::FieldResolver`:
+
+```ruby
+class MyFieldResolver < GraphQL::Cardinal::FieldResolver
+   def resolve(objects, args, ctx, scope)
+      map_sources(objects) { |obj| obj.my_field }
+   end
+end
+```
+
+A field resolver provides:
+
+* `objects`: the array of objects to resolve the field on.
+* `args`: the coerced arguments provided to this selection field.
+* `ctx`: the request context.
+* `scope`: (experimental) a handle to the execution scope that invokes lazy hooks.
+
+A resolver must return a mapped set of data for the provided objects. Always use the `map_sources` helper for your mapping loop to assure that exceptions are captured properly. You may return errors for a field position by mapping an `ExecutionError` into it:
+
+```ruby
+class MyFieldResolver < GraphQL::Cardinal::FieldResolver
+   def resolve(objects, args, ctx, scope)
+      map_sources(objects) do |obj|
+         obj.valid? ? obj.my_field : GraphQL::Cardinal::ExecutionError.new("Object field not valid")
+      end
+   end
+end
+```
+
+Now setup a resolver map:
+
+```ruby
+RESOLVER_MAP = {
+  "MyType" => {
+    "myField" => MyFieldResolver.new,
+  },
+  "Query" => {
+    "myType" => MyTypeResolver.new,
+  },
+}.freeze
+```
+
+Now parse your schema definition and execute requests:
+
+```ruby
+SCHEMA = GraphQL::Schema.from_definition(%|
+  type MyType {
+    myField: String
+  }
+  type Query {
+    myType: MyType
+  }
+|)
+
+result = GraphQL::Cardinal::Executor.new(
+   SCHEMA,
+   RESOLVER_MAP,
+   GraphQL.parse(query),
+   {}, # root object
+   variables: { ... },
+   context: { ... },
+   tracers: [ ... ],
+).perform
+```
