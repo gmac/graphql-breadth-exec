@@ -18,7 +18,11 @@ module GraphQL
       end
 
       def resolve(objects, _args, _ctx, _scope)
-        objects.map { _1[@key] }
+        objects.map do |hash|
+          hash[@key]
+        rescue StandardError => e
+          InternalError.new
+        end
       end
     end
 
