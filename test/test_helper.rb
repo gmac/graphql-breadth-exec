@@ -19,11 +19,6 @@ require 'graphql/batch'
 require_relative './fixtures'
 
 def breadth_exec(query, source, variables: {}, context: {})
-  executor = GraphQL::Cardinal::BreadthExecutor.new(SCHEMA, BREADTH_RESOLVERS, GraphQL.parse(query), source)
-  executor.perform
-end
-
-def depth_exec(query, source, variables: {}, context: {})
-  executor = GraphQL::Cardinal::DepthExecutor.new(SCHEMA, DEPTH_RESOLVERS, GraphQL.parse(query), source)
+  executor = GraphQL::Cardinal::Executor.new(SCHEMA, BREADTH_RESOLVERS, GraphQL.parse(query), source)
   executor.perform
 end

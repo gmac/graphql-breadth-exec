@@ -294,7 +294,5 @@ module GraphQL
         # todo: hook up some kind of error reporting...
       end
     end
-
-    class BreadthExecutor < Executor; end
   end
 end

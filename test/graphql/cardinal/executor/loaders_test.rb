@@ -95,7 +95,7 @@ class GraphQL::Cardinal::Executor::LoadersTest < Minitest::Test
       }
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
+    executor = GraphQL::Cardinal::Executor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
     assert_equal expected, executor.perform
     assert_equal [["Apple", "Banana"], ["Coconut"]], FancyLoader.perform_keys
   end
@@ -129,7 +129,7 @@ class GraphQL::Cardinal::Executor::LoadersTest < Minitest::Test
       }
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
+    executor = GraphQL::Cardinal::Executor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
     result = executor.perform
     assert_equal expected, result
     assert_equal result.dig("data", "widget").keys, expected.dig("data", "widget").keys
@@ -164,7 +164,7 @@ class GraphQL::Cardinal::Executor::LoadersTest < Minitest::Test
       }
     }
 
-    executor = GraphQL::Cardinal::BreadthExecutor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
+    executor = GraphQL::Cardinal::Executor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
     result = executor.perform
     assert_equal expected, result
     assert_equal result.dig("data", "widget").keys, expected.dig("data", "widget").keys
