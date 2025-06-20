@@ -3,36 +3,35 @@
 require_relative "./executor/execution_scope"
 require_relative "./executor/execution_field"
 require_relative "./executor/authorization"
-require_relative "./executor/tracer"
 require_relative "./executor/hot_paths"
 require_relative "./executor/response_hash"
-require_relative "./executor/response_shape"
+require_relative "./executor/error_formatting"
 
 module GraphQL
   module Cardinal
     class Executor
       include HotPaths
-      include ResponseShape
+      include ErrorFormatting
 
       TYPENAME_FIELD = "__typename"
       TYPENAME_FIELD_RESOLVER = TypenameResolver.new
 
       attr_reader :exec_count
 
-      def initialize(schema, resolvers, document, root_object)
+      def initialize(schema, resolvers, document, root_object, variables: {}, context: {}, tracers: [])
         @query = GraphQL::Query.new(schema, document: document) # << for schema reference
         @resolvers = resolvers
         @document = document
         @root_object = root_object
-        @tracer = Tracer.new
-        @variables = {}
-        @context = { query: @query }
+        @tracers = tracers
+        @variables = variables
+        @context = context
         @data = {}
         @errors = []
-        @inline_errors = false
         @path = []
         @exec_queue = []
         @exec_count = 0
+        @context[:query] = @query
       end
 
       def perform
@@ -70,9 +69,7 @@ module GraphQL
           execute_scope(@exec_queue.shift) until @exec_queue.empty?
         end
 
-        response = {
-          "data" => @inline_errors ? shape_response(@data) : @data,
-        }
+        response = { "data" => @errors.empty? ? @data : format_inline_errors(@data, @errors) }
         response["errors"] = @errors.map(&:to_h) unless @errors.empty?
         response
       end
@@ -102,22 +99,21 @@ module GraphQL
             end
 
             resolved_sources = if !field_resolver.authorized?(@context)
-              @errors << AuthorizationError.new(type_name: parent_type.graphql_name, field_name: field_name, path: @path.dup)
-              Array.new(parent_sources.length, nil)
+              @errors << AuthorizationError.new(type_name: parent_type.graphql_name, field_name: field_name, path: @path.dup, base: true)
+              Array.new(parent_sources.length, @errors.last)
             elsif !Authorization.can_access_type?(value_type, @context)
-              @errors << AuthorizationError.new(type_name: value_type.graphql_name, path: @path.dup)
-              Array.new(parent_sources.length, nil)
+              @errors << AuthorizationError.new(type_name: value_type.graphql_name, path: @path.dup, base: true)
+              Array.new(parent_sources.length, @errors.last)
             else
               begin
-                @tracer&.before_resolve_field(parent_type, field_name, parent_sources.length, @context)
+                @tracers.each { _1.before_resolve_field(parent_type, field_name, parent_sources.length, @context) }
                 field_resolver.resolve(parent_sources, exec_field.arguments(@variables), @context, exec_scope)
               rescue StandardError => e
-                raise e
-                report_exception(e.message)
-                @errors << InternalError.new(e.message, path: @path.dup)
-                Array.new(parent_sources.length, nil)
+                report_exception(error: e)
+                @errors << InternalError.new(path: @path.dup, base: true)
+                Array.new(parent_sources.length, @errors.last)
               ensure
-                @tracer&.after_resolve_field(parent_type, field_name, parent_sources.length, @context)
+                @tracers.each { _1.after_resolve_field(parent_type, field_name, parent_sources.length, @context) }
                 @exec_count += 1
               end
             end
@@ -197,8 +193,8 @@ module GraphQL
             next_sources_by_type.each do |impl_type, impl_type_sources|
               # check concrete type access only once per resolved type...
               unless Authorization.can_access_type?(impl_type, @context)
-                @errors << AuthorizationError.new(type_name: impl_type.graphql_name, path: @path.dup)
-                impl_type_sources = Array.new(impl_type_sources.length, nil)
+                @errors << AuthorizationError.new(type_name: impl_type.graphql_name, path: @path.dup, base: true)
+                impl_type_sources = Array.new(impl_type_sources.length, @errors.last)
               end
 
               loader_group << ExecutionScope.new(
@@ -262,7 +258,7 @@ module GraphQL
             end
 
           else
-            raise DocumentError.new("selection node type")
+            raise DocumentError.new("Invalid selection node type")
           end
         end
         map
@@ -290,8 +286,10 @@ module GraphQL
         end
       end
 
-      def report_exception(message, path: @path.dup)
-        # todo: hook up some kind of error reporting...
+      def report_exception(message = nil, error: nil, path: @path.dup)
+        # todo: add real error reporting...
+        puts "Error at #{path.join(".")}: #{message || error&.message}"
+        puts error.backtrace.join("\n") if error
       end
     end
   end

@@ -13,6 +13,7 @@ end
 require_relative "cardinal/errors"
 require_relative "cardinal/promise"
 require_relative "cardinal/loader"
+require_relative "cardinal/tracer"
 require_relative "cardinal/field_resolvers"
 require_relative "cardinal/executor"
 require_relative "cardinal/version"

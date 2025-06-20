@@ -32,15 +32,15 @@ module GraphQL::Cardinal
       # DANGER: HOT PATH!
       # Overhead added here scales dramatically...
       def build_missing_value(field_type, val)
+        # the provided value should always be nil or an error object
+
         if field_type.non_null?
-          # upgrade nil in non-null positions to an error
-          val = InvalidNullError.new(path: @path.dup, original_error: val)
+          val ||= InvalidNullError.new(path: @path.dup)
         end
 
         if val
-          # assure all errors have paths, and note inline error additions
-          val = val.path ? val : ExecutionError.new(val.message, path: @path.dup)
-          @inline_errors = true
+          val.replace_path(@path.dup) unless val.path
+          @errors << val unless val.base_error?
         end
 
         val

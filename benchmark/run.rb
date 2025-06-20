@@ -12,6 +12,7 @@ require_relative '../test/fixtures'
 class GraphQLBenchmark
   DOCUMENT = GraphQL.parse(BASIC_DOCUMENT)
   CARDINAL_SCHEMA = SCHEMA
+  CARDINAL_TRACER = GraphQL::Cardinal::Tracer.new
 
   class Schema < GraphQL::Schema
     lazy_resolve(Proc, :call)
@@ -49,7 +50,8 @@ class GraphQLBenchmark
               SCHEMA,
               BREADTH_RESOLVERS,
               DOCUMENT,
-              data_source
+              data_source,
+              tracers: [CARDINAL_TRACER],
             ).perform
           end
 
@@ -81,7 +83,8 @@ class GraphQLBenchmark
               SCHEMA,
               BREADTH_DEFERRED_RESOLVERS,
               DOCUMENT,
-              data_source
+              data_source,
+              tracers: [CARDINAL_TRACER],
             ).perform
           end
 
@@ -110,7 +113,8 @@ class GraphQLBenchmark
             SCHEMA,
             BREADTH_RESOLVERS,
             DOCUMENT,
-            data_source
+            data_source,
+            tracers: [CARDINAL_TRACER],
           ).perform
         end
 
