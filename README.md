@@ -2,7 +2,7 @@
 
 **An (experimental) breadth-first GraphQL executor for Ruby**
 
-Depth-first execution resolves every object field descending down a response tree, while breadth-first visits every _selection position_ once with an aggregated set of objects. The breadth-first approach tends to be much faster due to fewer resolver calls and intermediary promises.
+Depth-first execution resolves every object field descending down a response tree, while breadth-first visits every _selection position_ once with an aggregated set of objects. The breadth-first approach is much faster due to fewer resolver calls and intermediary promises.
 
 ```shell
 graphql-ruby: 140002 resolvers
@@ -43,5 +43,5 @@ Breadth-first then runs a single resolver per document selection, and coalesces 
 
 While bigger responses will always take longer to process, the workload is your own business logic with very little GraphQL execution overhead. Other advantages:
 
-* Eliminates the need for DataLoader promises, because resolvers are inherently batched.
-* Executes via flat queuing without deep recursion and huge call stacks.
+* Eliminates boilerplate need for DataLoader promises, because resolvers are inherently batched.
+* Executes via flat queuing without deep recursion and large call stacks.
