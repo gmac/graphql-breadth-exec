@@ -2,7 +2,7 @@
 
 require "test_helper"
 
-class GraphQL::Cardinal::Executor::ScopeLoaderTest < Minitest::Test
+class GraphQL::Cardinal::Executor::LoadersTest < Minitest::Test
 
   class FancyLoader < GraphQL::Cardinal::Loader
     class << self
@@ -42,6 +42,8 @@ class GraphQL::Cardinal::Executor::ScopeLoaderTest < Minitest::Test
       first: String
       second: String
       third: String
+      syncObject: Widget
+      syncScalar: String
     }
 
     type Query {
@@ -54,6 +56,8 @@ class GraphQL::Cardinal::Executor::ScopeLoaderTest < Minitest::Test
       "first" => FirstResolver.new,
       "second" => SecondResolver.new,
       "third" => ThirdResolver.new,
+      "syncObject" => GraphQL::Cardinal::HashKeyResolver.new("syncObject"),
+      "syncScalar" => GraphQL::Cardinal::HashKeyResolver.new("syncScalar"),
     },
     "Query" => {
       "widget" => GraphQL::Cardinal::HashKeyResolver.new("widget"),
@@ -64,7 +68,7 @@ class GraphQL::Cardinal::Executor::ScopeLoaderTest < Minitest::Test
     FancyLoader.perform_keys = []
   end
 
-  def test_runs
+  def test_splits_loaders_by_group_across_fields
     document = GraphQL.parse(%|{
       widget {
         first
@@ -94,5 +98,75 @@ class GraphQL::Cardinal::Executor::ScopeLoaderTest < Minitest::Test
     executor = GraphQL::Cardinal::BreadthExecutor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
     assert_equal expected, executor.perform
     assert_equal [["Apple", "Banana"], ["Coconut"]], FancyLoader.perform_keys
+  end
+
+  def test_maintains_ordered_selections_around_object_fields
+    document = GraphQL.parse(%|{
+      widget {
+        a: syncObject { first }
+        first
+        b: syncObject { first }
+        second
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+        "second" => "Banana",
+        "syncObject" => { "first" => "NotLazy" },
+      },
+    }
+
+    expected = {
+      "data" => {
+        "widget" => {
+          "a" => { "first" => "NotLazy-a" },
+          "first" => "Apple-a",
+          "b" => { "first" => "NotLazy-a" },
+          "second" => "Banana-a",
+        }
+      }
+    }
+
+    executor = GraphQL::Cardinal::BreadthExecutor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
+    result = executor.perform
+    assert_equal expected, result
+    assert_equal result.dig("data", "widget").keys, expected.dig("data", "widget").keys
+  end
+
+  def test_maintains_ordered_selections_around_leaf_fields
+    document = GraphQL.parse(%|{
+      widget {
+        a: syncScalar
+        first
+        b: syncScalar
+        second
+      }
+    }|)
+
+    source = {
+      "widget" => {
+        "first" => "Apple",
+        "second" => "Banana",
+        "syncScalar" => "NotLazy",
+      },
+    }
+
+    expected = {
+      "data" => {
+        "widget" => {
+          "a" => "NotLazy",
+          "first" => "Apple-a",
+          "b" => "NotLazy",
+          "second" => "Banana-a",
+        }
+      }
+    }
+
+    executor = GraphQL::Cardinal::BreadthExecutor.new(LOADER_SCHEMA, LOADER_RESOLVERS, document, source)
+    result = executor.perform
+    assert_equal expected, result
+    assert_equal result.dig("data", "widget").keys, expected.dig("data", "widget").keys
   end
 end

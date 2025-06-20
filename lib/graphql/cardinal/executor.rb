@@ -226,7 +226,9 @@ module GraphQL
           # build leaf results
           resolved_sources.each_with_index do |val, i|
             # DANGER: HOT PATH!
-            parent_responses[i][field_key] = if val.nil? || val.is_a?(StandardError)
+            response = parent_responses[i]
+            lazy_field_keys.each { |k| response[k] = nil } if lazy_field_keys && !lazy_field_keys.empty?
+            response[field_key] = if val.nil? || val.is_a?(StandardError)
               build_missing_value(field_type, val)
             elsif return_type.kind.scalar?
               coerce_scalar_value(return_type, val)
