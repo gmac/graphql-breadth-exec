@@ -23,6 +23,12 @@ module GraphQL
         end
       end
 
+      def self.resolve(value)
+        Promise.new do |resolve, reject|
+          resolve.call(value)
+        end
+      end
+
       def self.all(promises)
         return Promise.resolve([]) if promises.empty?
 
@@ -57,8 +63,8 @@ module GraphQL
         end
       end
 
-      def catch(on_rejected = nil)
-        self.then(nil, on_rejected)
+      def catch(on_rejected = nil, &block)
+        self.then(->(value) { value }, on_rejected || block)
       end
 
       def resolved?
@@ -107,7 +113,7 @@ module GraphQL
         if resolved?
           begin
             result = on_fulfilled.call(@value)
-            resolve.call(result)
+            result.is_a?(Promise) ? result.then(resolve, reject) : resolve.call(result)
           rescue => error
             reject.call(error)
           end

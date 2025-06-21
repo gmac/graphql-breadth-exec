@@ -5,22 +5,22 @@ module GraphQL::Cardinal
     module HotPaths
       # DANGER: HOT PATH!
       # Overhead added here scales dramatically...
-      def build_composite_response(field_type, source, next_sources, next_responses)
+      def build_composite_response(exec_field, current_type, source, next_sources, next_responses)
         # if object authorization check implemented, then...
         # unless Authorization.can_access_object?(return_type, source, @context)
 
         if source.nil? || source.is_a?(ExecutionError)
-          build_missing_value(field_type, source)
-        elsif field_type.list?
+          build_missing_value(exec_field, current_type, source)
+        elsif current_type.list?
           unless source.is_a?(Array)
-            report_exception("Incorrect result for list field. Expected Array, got #{source.class}")
-            return build_missing_value(field_type, nil)
+            report_exception("Incorrect result for list field. Expected Array, got #{source.class}", field: exec_field)
+            return build_missing_value(exec_field, current_type, nil)
           end
 
-          field_type = field_type.of_type while field_type.non_null?
+          current_type = current_type.of_type while current_type.non_null?
 
           source.map do |src|
-            build_composite_response(field_type.of_type, src, next_sources, next_responses)
+            build_composite_response(exec_field, current_type.of_type, src, next_sources, next_responses)
           end
         else
           next_sources << source
@@ -31,15 +31,14 @@ module GraphQL::Cardinal
 
       # DANGER: HOT PATH!
       # Overhead added here scales dramatically...
-      def build_missing_value(field_type, val)
+      def build_missing_value(exec_field, current_type, val)
         # the provided value should always be nil or an error object
-
-        if field_type.non_null?
-          val ||= InvalidNullError.new(path: @path.dup)
+        if current_type.non_null?
+          val ||= InvalidNullError.new(path: exec_field.path)
         end
 
         if val
-          val.replace_path(@path.dup) unless val.path
+          val.replace_path(exec_field.path) unless val.path
           @errors << val unless val.base_error?
         end
 

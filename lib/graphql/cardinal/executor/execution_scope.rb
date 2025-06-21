@@ -3,7 +3,7 @@
 module GraphQL::Cardinal
   class Executor
     class ExecutionScope
-      attr_reader :parent_type, :selections, :sources, :responses, :parent
+      attr_reader :parent_type, :selections, :sources, :responses, :path, :parent
       attr_accessor :fields
 
       def initialize(
@@ -13,6 +13,7 @@ module GraphQL::Cardinal
         responses:,
         loader_cache: nil,
         loader_group: nil,
+        path: [],
         parent: nil
       )
         @parent_type = parent_type
@@ -21,6 +22,7 @@ module GraphQL::Cardinal
         @responses = responses
         @loader_cache = loader_cache
         @loader_group = loader_group
+        @path = path.freeze
         @parent = parent
         @fields = nil
       end
@@ -30,9 +32,8 @@ module GraphQL::Cardinal
         loader.load(keys)
       end
 
-      # does any field in this scope have a pending promise?
-      def lazy_fields_pending?
-        @fields&.each_value&.any? { _1.promise&.pending? } || false
+      def lazy_fields?
+        @fields&.each_value&.any? { _1.result.is_a?(Promise) } || false
       end
 
       # is this scope ungrouped, or have all scopes in the group built their fields?
@@ -47,7 +48,7 @@ module GraphQL::Cardinal
       end
 
       def lazy_exec!
-        loader_cache.each_value { |loader| loader.method(:lazy_exec!).call }
+        loader_cache.each_value { |loader| loader.send(:lazy_exec!) }
       end
     end
   end

@@ -3,7 +3,7 @@
 require "test_helper"
 
 class GraphQL::Cardinal::Executor::ErrorsTest < Minitest::Test
-  def test_nullable_positional_errors
+  def test_nullable_positional_error_adds_path
     document = %|{
       products(first: 3) {
         nodes {
@@ -17,7 +17,7 @@ class GraphQL::Cardinal::Executor::ErrorsTest < Minitest::Test
         "nodes" => [
           { "maybe" => "okay!" },
           { "maybe" => nil },
-          { "maybe" => GraphQL::Cardinal::ExecutionError.new },
+          { "maybe" => GraphQL::Cardinal::ExecutionError.new("Not okay!") },
         ],
       },
     }
@@ -33,7 +33,7 @@ class GraphQL::Cardinal::Executor::ErrorsTest < Minitest::Test
         },
       },
       "errors" => [{
-        "message" => "An unknown error occurred",
+        "message" => "Not okay!",
         "path" => ["products", "nodes", 2, "maybe"],
       }],
     }
@@ -41,7 +41,38 @@ class GraphQL::Cardinal::Executor::ErrorsTest < Minitest::Test
     assert_equal expected, breadth_exec(document, source)
   end
 
-  def test_non_null_positional_errors
+  def test_non_null_positional_error_adds_path_and_propagates
+    document = %|{
+      products(first: 3) {
+        nodes {
+          must
+        }
+      }
+    }|
+
+    source = {
+      "products" => {
+        "nodes" => [
+          { "must" => "okay!" },
+          { "must" => GraphQL::Cardinal::ExecutionError.new("Not okay!") },
+        ],
+      },
+    }
+
+    expected = {
+      "data" => {
+        "products" => { "nodes" => nil },
+      },
+      "errors" => [{
+        "message" => "Not okay!",
+        "path" => ["products", "nodes", 1, "must"],
+      }],
+    }
+
+    assert_equal expected, breadth_exec(document, source)
+  end
+
+  def test_null_in_non_null_position_propagates
     document = %|{
       products(first: 3) {
         nodes {
@@ -55,23 +86,17 @@ class GraphQL::Cardinal::Executor::ErrorsTest < Minitest::Test
         "nodes" => [
           { "must" => "okay!" },
           { "must" => nil },
-          { "must" => GraphQL::Cardinal::ExecutionError.new },
         ],
       },
     }
 
     expected = {
       "data" => {
-        "products" => {
-          "nodes" => nil,
-        },
+        "products" => { "nodes" => nil },
       },
       "errors" => [{
         "message" => "Failed to resolve expected value",
         "path" => ["products", "nodes", 1, "must"],
-      }, {
-        "message" => "An unknown error occurred",
-        "path" => ["products", "nodes", 2, "must"],
       }],
     }
 

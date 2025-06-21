@@ -3,18 +3,26 @@
 
 module GraphQL::Cardinal
   class Executor
-    module ErrorFormatting
-      private
+    class ErrorFormatter
+      def initialize(query, data, errors)
+        @query = query
+        @data = data
+        @target_paths = errors.map(&:path).tap(&:compact!).tap(&:uniq!)
+        @selection_path = []
+        @actual_path = []
+      end
 
-      def format_inline_errors(data, _errors)
-        # todo: make this smarter to only traverse down actual error paths
-        @path = []
+      def perform
+        return @data if @target_paths.empty?
+
         propagate_object_scope_errors(
-          data,
+          @data,
           @query.root_type_for_operation(@query.selected_operation.operation_type),
           @query.selected_operation.selections,
         )
       end
+
+      private
 
       def propagate_object_scope_errors(raw_object, parent_type, selections)
         return nil if raw_object.nil?
@@ -22,16 +30,24 @@ module GraphQL::Cardinal
         selections.each do |node|
           case node
           when GraphQL::Language::Nodes::Field
-            field_name = node.alias || node.name
-            @path << field_name
+            field_key = node.alias || node.name
+
+            return raw_object unless @target_paths.any? do |target_path|
+              target_path[@selection_path.length] == field_key && @selection_path.each_with_index.all? do |part, i|
+                part == target_path[i]
+              end
+            end
+
+            @selection_path << field_key
+            @actual_path << field_key
 
             begin
               node_type = @query.get_field(parent_type, node.name).type
               named_type = node_type.unwrap
-              raw_value = raw_object[field_name]
+              raw_value = raw_object[field_key]
 
-              raw_object[field_name] = if raw_value.is_a?(ExecutionError)
-                raw_value.replace_path(@path.dup) unless raw_value.base_error?
+              raw_object[field_key] = if raw_value.is_a?(ExecutionError)
+                raw_value.replace_path(@actual_path.dup) unless raw_value.base_error?
                 nil
               elsif node_type.list?
                 node_type = node_type.of_type while node_type.non_null?
@@ -42,9 +58,10 @@ module GraphQL::Cardinal
                 propagate_object_scope_errors(raw_value, named_type, node.selections)
               end
 
-              return nil if node_type.non_null? && raw_object[field_name].nil?
+              return nil if node_type.non_null? && raw_object[field_key].nil?
             ensure
-              @path.pop
+              @selection_path.pop
+              @actual_path.pop
             end
 
           when GraphQL::Language::Nodes::InlineFragment
@@ -79,7 +96,7 @@ module GraphQL::Cardinal
         contains_null = false
 
         resolved_list = raw_list.map!.with_index do |raw_list_element, index|
-          @path << index
+          @actual_path << index
 
           begin
             result = if next_node_type.list?
@@ -97,7 +114,7 @@ module GraphQL::Cardinal
 
             result
           ensure
-            @path.pop
+            @actual_path.pop
           end
         end
 

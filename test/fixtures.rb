@@ -38,6 +38,7 @@ SDL = <<~SCHEMA
     products(first: Int): ProductConnection
     nodes(ids: [ID!]!): [Node]!
     node(id: ID!): Node
+    noResolver: String
   }
 
   type WriteValuePayload {
@@ -325,4 +326,3 @@ BASIC_SOURCE = {
     }],
   },
 }
-
