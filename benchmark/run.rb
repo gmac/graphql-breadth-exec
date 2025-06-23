@@ -66,16 +66,26 @@ class GraphQLBenchmark
 
       with_data_sizes(sizes) do |data_source, num_objects|
         Benchmark.ips do |x|
-          x.report("graphql-ruby lazy: #{num_objects} resolvers") do
-            GRAPHQL_GEM_LAZY_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
-          end
+          # x.report("graphql-ruby lazy: #{num_objects} resolvers") do
+          #   GRAPHQL_GEM_LAZY_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          # end
 
-          x.report("graphql-ruby dataloader: #{num_objects} resolvers") do
-            GRAPHQL_GEM_DATALOADER_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
-          end
+          # x.report("graphql-ruby dataloader: #{num_objects} resolvers") do
+          #   GRAPHQL_GEM_DATALOADER_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          # end
 
-          x.report("graphql-ruby batch: #{num_objects} resolvers") do
-            GRAPHQL_GEM_BATCH_LOADER_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          # x.report("graphql-ruby batch: #{num_objects} resolvers") do
+          #   GRAPHQL_GEM_BATCH_LOADER_SCHEMA.execute(document: DOCUMENT, root_value: data_source)
+          # end
+
+          x.report("graphql-cardinal #{num_objects} resolvers") do
+            GraphQL::Cardinal::Executor.new(
+              SCHEMA,
+              BREADTH_RESOLVERS,
+              DOCUMENT,
+              data_source,
+              tracers: [CARDINAL_TRACER],
+            ).perform
           end
 
           x.report("graphql-cardinal: #{num_objects} lazy resolvers") do
