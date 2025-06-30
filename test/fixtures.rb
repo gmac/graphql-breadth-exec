@@ -34,10 +34,32 @@ SDL = <<~SCHEMA
     nodes: [Variant!]!
   }
 
+  enum WidgetStatus {
+    YES
+    NO
+  }
+
+  type Widget {
+    status: WidgetStatus
+  }
+
+  input DimensionInput {
+    width: Int = 1
+    height: Int = 2
+    depth: Int = 3
+  }
+
+  input WidgetCreateInput {
+    price: Int = 25
+    status: String = "ACTIVE"
+    dimension: DimensionInput = { height: 25 }
+  }
+
   type Query {
     products(first: Int): ProductConnection
-    nodes(ids: [ID!]!): [Node]!
-    node(id: ID!): Node
+    nodes(ids: [ID!]!, sfooBar:String = "woof"): [Node]!
+    node(id: ID!, sfooBar:String = "woof"): Node
+    widget: Widget
     noResolver: String
   }
 
@@ -47,6 +69,7 @@ SDL = <<~SCHEMA
 
   type Mutation {
     writeValue(value: String!): WriteValuePayload
+    widgetCreate(input: WidgetCreateInput = {}): Widget
   }
 SCHEMA
 
@@ -98,11 +121,11 @@ end
 BREADTH_RESOLVERS = {
   "Node" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.query.get_type(obj["__typename__"]) },
   },
   "HasMetafields" => {
     "metafield" => GraphQL::Cardinal::HashKeyResolver.new("metafield"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.query.get_type(obj["__typename__"]) },
   },
   "Metafield" => {
     "key" => GraphQL::Cardinal::HashKeyResolver.new("key"),
@@ -136,17 +159,18 @@ BREADTH_RESOLVERS = {
   },
   "Mutation" => {
     "writeValue" => WriteValueResolver.new,
+    "widgetCreate" => GraphQL::Cardinal::HashKeyResolver.new("widgetCreate"),
   },
 }.freeze
 
 BREADTH_DEFERRED_RESOLVERS = {
   "Node" => {
     "id" => DeferredHashResolver.new("id"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.query.get_type(obj["__typename__"]) },
   },
   "HasMetafields" => {
     "metafield" => DeferredHashResolver.new("metafield"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.query.get_type(obj["__typename__"]) },
   },
   "Metafield" => {
     "key" => DeferredHashResolver.new("key"),
@@ -222,6 +246,12 @@ GEM_RESOLVERS = {
   },
   "Query" => {
     "products" => ->(obj, args, ctx) { obj["products"] },
+  },
+  "Mutation" => {
+    "widgetCreate" => ->(obj, args, ctx) { 
+       binding.pry
+      "wat?"
+     },
   },
 }.freeze
 

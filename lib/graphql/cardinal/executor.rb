@@ -4,6 +4,7 @@ require_relative "./executor/execution_scope"
 require_relative "./executor/execution_field"
 require_relative "./executor/authorization"
 require_relative "./executor/hot_paths"
+require_relative "./executor/coercions"
 require_relative "./executor/response_hash"
 require_relative "./executor/error_formatter"
 
@@ -11,6 +12,7 @@ module GraphQL
   module Cardinal
     class Executor
       include HotPaths
+      include Coercions
 
       TYPENAME_FIELD = "__typename"
       TYPENAME_FIELD_RESOLVER = TypenameResolver.new
@@ -18,18 +20,17 @@ module GraphQL
       attr_reader :exec_count
 
       def initialize(schema, resolvers, document, root_object, variables: {}, context: {}, tracers: [])
-        @query = GraphQL::Query.new(schema, document: document) # << for schema reference
+        @query = GraphQL::Query.new(schema, document: document, variables: variables, context: context) # << for schema reference
         @resolvers = resolvers
         @document = document
         @root_object = root_object
         @tracers = tracers
-        @variables = variables
-        @context = context
+        @variables = @query.variables.to_h
+        @context = @query.context
         @data = {}
         @errors = []
         @exec_queue = []
         @exec_count = 0
-        @context[:query] = @query
       end
 
       def perform
@@ -83,7 +84,8 @@ module GraphQL
             field_name = exec_field.name
 
             exec_field.scope = exec_scope
-            exec_field.type = @query.get_field(parent_type, field_name).type
+            exec_field.field = @query.get_field(parent_type, field_name)
+            exec_field.type = exec_field.field.type
             value_type = exec_field.type.unwrap
 
             field_resolver = @resolvers.dig(parent_type.graphql_name, field_name)
@@ -104,7 +106,7 @@ module GraphQL
             else
               begin
                 @tracers.each { _1.before_resolve_field(parent_type, field_name, parent_sources.length, @context) }
-                field_resolver.resolve(parent_sources, exec_field.arguments(@variables), @context, exec_scope)
+                field_resolver.resolve(parent_sources, exec_field.build_arguments(@query, @variables), @context, exec_scope)
               rescue StandardError => e
                 report_exception(error: e, field: exec_field)
                 @errors << InternalError.new(path: exec_field.path, base: true)

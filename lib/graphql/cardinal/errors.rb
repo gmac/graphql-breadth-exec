@@ -46,6 +46,7 @@ module GraphQL
     end
 
     class InternalError < ExecutionError; end
+    class InvalidInputError < StandardError; end
     class DocumentError < StandardError; end
   end
 end
