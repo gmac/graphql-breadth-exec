@@ -24,7 +24,7 @@ module GraphQL
         @root_object = root_object
         @tracers = tracers
         @variables = variables
-        @context = context
+        @context = @query.context
         @data = {}
         @errors = []
         @exec_queue = []
@@ -211,10 +211,8 @@ module GraphQL
             # DANGER: HOT PATH!
             parent_responses[i][field_key] = if val.nil? || val.is_a?(StandardError)
               build_missing_value(exec_field, field_type, val)
-            elsif return_type.kind.scalar?
-              coerce_scalar_value(return_type, val)
-            elsif return_type.kind.enum?
-              coerce_enum_value(return_type, val)
+            elsif return_type.kind.leaf?
+              coerce_leaf_value(exec_field, field_type, val)
             else
               val
             end

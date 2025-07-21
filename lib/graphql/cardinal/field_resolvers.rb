@@ -36,6 +36,18 @@ module GraphQL
       end
     end
 
+    class MethodResolver < FieldResolver
+      def initialize(name)
+        @name = name
+      end
+
+      def resolve(objects, _args, _ctx, _scope)
+        map_sources(objects) do |obj|
+          obj.public_send(@name)
+        end
+      end
+    end
+
     class TypenameResolver < FieldResolver
       def resolve(objects, _args, _ctx, scope)
         typename = scope.parent_type.graphql_name.freeze
