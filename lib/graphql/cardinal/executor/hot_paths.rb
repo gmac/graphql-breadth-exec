@@ -3,6 +3,8 @@
 module GraphQL::Cardinal
   class Executor
     module HotPaths
+      INCORRECT_LIST_VALUE = "Incorrect result for list field. Expected Array, got ".freeze
+
       # DANGER: HOT PATH!
       # Overhead added here scales dramatically...
       def build_composite_response(exec_field, current_type, source, next_sources, next_responses)
@@ -13,7 +15,7 @@ module GraphQL::Cardinal
           build_missing_value(exec_field, current_type, source)
         elsif current_type.list?
           unless source.is_a?(Array)
-            report_exception("Incorrect result for list field. Expected Array, got #{source.class}", field: exec_field)
+            report_exception("#{INCORRECT_LIST_VALUE}#{source.class}", field: exec_field)
             return build_missing_value(exec_field, current_type, nil)
           end
 
@@ -47,27 +49,24 @@ module GraphQL::Cardinal
 
       # DANGER: HOT PATH!
       # Overhead added here scales dramatically...
-      def coerce_scalar_value(type, value)
-        case type.graphql_name
-        when "String"
-          value.is_a?(String) ? value : value.to_s
-        when "ID"
-          value.is_a?(String) || value.is_a?(Numeric) ? value : value.to_s
-        when "Int"
-          value.is_a?(Integer) ? value : Integer(value)
-        when "Float"
-          value.is_a?(Float) ? value : Float(value)
-        when "Boolean"
-          value == TrueClass || value == FalseClass ? value : !!value
-        else
-          value
-        end
-      end
+      def coerce_leaf_value(exec_field, current_type, val)
+        if current_type.list?
+          unless val.is_a?(Array)
+            report_exception("#{INCORRECT_LIST_VALUE}#{val.class}", field: exec_field)
+            return build_missing_value(exec_field, current_type, nil)
+          end
+          
+          current_type = current_type.of_type while current_type.non_null?
 
-      # DANGER: HOT PATH!
-      # Overhead added here scales dramatically...
-      def coerce_enum_value(type, value)
-        value
+          val.each { coerce_leaf_value(exec_field, current_type.of_type, _1) }
+        else
+          begin
+            current_type.unwrap.coerce_result(val, @context)
+          rescue StandardError => e
+            report_exception("Coercion error", field: exec_field)
+            build_missing_value(exec_field, current_type, val)
+          end
+        end
       end
     end
   end

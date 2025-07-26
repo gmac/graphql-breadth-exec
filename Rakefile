@@ -32,6 +32,12 @@ namespace :benchmark do
     GraphQLBenchmark.benchmark_lazy_execution
   end
 
+  desc "Benchmark introspection"
+  task :introspection do
+    prepare_benchmark
+    GraphQLBenchmark.benchmark_introspection
+  end
+
   desc "Memory profile"
   task :memory do
     prepare_benchmark

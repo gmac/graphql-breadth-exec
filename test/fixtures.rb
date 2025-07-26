@@ -96,6 +96,7 @@ class SimpleHashBatchLoader < GraphQL::Batch::Loader
 end
 
 BREADTH_RESOLVERS = {
+  **GraphQL::Cardinal::Introspection::TYPE_RESOLVERS,
   "Node" => {
     "id" => GraphQL::Cardinal::HashKeyResolver.new("id"),
     "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
@@ -130,6 +131,7 @@ BREADTH_RESOLVERS = {
     "value" => GraphQL::Cardinal::HashKeyResolver.new("value"),
   },
   "Query" => {
+    **GraphQL::Cardinal::Introspection::ENTRYPOINT_RESOLVERS,
     "products" => GraphQL::Cardinal::HashKeyResolver.new("products"),
     "nodes" => GraphQL::Cardinal::HashKeyResolver.new("nodes"),
     "node" => GraphQL::Cardinal::HashKeyResolver.new("node"),

@@ -93,6 +93,28 @@ class GraphQLBenchmark
       end
     end
 
+    def benchmark_introspection
+      document = GraphQL.parse(GraphQL::Introspection.query)
+      
+      Benchmark.ips do |x|
+        x.report("graphql-ruby: introspection") do
+          GRAPHQL_GEM_SCHEMA.execute(document: document)
+        end
+
+        x.report("graphql-cardinal introspection") do
+          GraphQL::Cardinal::Executor.new(
+            SCHEMA,
+            BREADTH_RESOLVERS,
+            document,
+            {},
+            tracers: [CARDINAL_TRACER],
+          ).perform
+        end
+
+        x.compare!
+      end
+    end
+
     def memory_profile
       default_data_sizes = "10, 1000"
       sizes = ENV.fetch("SIZES", default_data_sizes).split(",").map(&:to_i)
