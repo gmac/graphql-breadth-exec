@@ -162,7 +162,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
       "args" => [{ "name" => "key" }],
       "description" => "@stitch description",
       "isRepeatable" => true,
-      "locations" => [:FIELD_DEFINITION],
+      "locations" => ["FIELD_DEFINITION"],
       "name" => "stitch"
     }
 
@@ -171,7 +171,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
 
   def test_introspect_type_access
     result = execute_query(%|{
-      __type(name: "Widget") { 
+      __type(name: "Widget") {
         description
         kind
         name
@@ -279,10 +279,10 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
 
   def test_introspect_type_specified_by_url
     result = execute_query(%|{
-      scalar: __type(name: "String") { 
+      scalar: __type(name: "String") {
         specifiedByURL
       }
-      non_scalar: __type(name: "Widget") { 
+      non_scalar: __type(name: "Widget") {
         specifiedByURL
       }
     }|)
@@ -303,7 +303,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
 
   def test_introspect_type_kind_of_type
     result = execute_query(%|{
-      __type(name: "Mutation") { 
+      __type(name: "Mutation") {
         name
         kind
         ofType { name }
@@ -361,7 +361,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
 
   def test_introspect_enum_value
     result = execute_query(%|{
-      __type(name: "Status") { 
+      __type(name: "Status") {
         enumValues(includeDeprecated: true) {
           deprecationReason
           description
@@ -399,7 +399,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
 
   def test_introspect_field
     result = execute_query(%|{
-      __type(name: "Query") { 
+      __type(name: "Query") {
         fields(includeDeprecated: true) {
           args { name }
           deprecationReason
@@ -452,7 +452,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
 
   def test_introspect_arguments
     result = execute_query(%|{
-      __type(name: "Mutation") { 
+      __type(name: "Mutation") {
         fields {
           some: args { name }
           all: args(includeDeprecated: true) {
@@ -510,7 +510,7 @@ class GraphQL::Cardinal::Executor::IntrospectionTest < Minitest::Test
     |)
 
     result = execute_query(%|{
-      __type(name: "Query") { 
+      __type(name: "Query") {
         fields {
           args { defaultValue }
         }

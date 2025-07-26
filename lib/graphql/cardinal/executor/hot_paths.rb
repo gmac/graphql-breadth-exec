@@ -55,16 +55,17 @@ module GraphQL::Cardinal
             report_exception("#{INCORRECT_LIST_VALUE}#{val.class}", field: exec_field)
             return build_missing_value(exec_field, current_type, nil)
           end
-          
+
           current_type = current_type.of_type while current_type.non_null?
 
-          val.each { coerce_leaf_value(exec_field, current_type.of_type, _1) }
+          val.map { coerce_leaf_value(exec_field, current_type.of_type, _1) }
         else
           begin
             current_type.unwrap.coerce_result(val, @context)
           rescue StandardError => e
-            report_exception("Coercion error", field: exec_field)
-            build_missing_value(exec_field, current_type, val)
+            report_exception("Error building leaf result", error: e, field: exec_field)
+            error = InternalError.new(path: exec_field.path, base: false)
+            build_missing_value(exec_field, current_type, error)
           end
         end
       end
