@@ -209,13 +209,7 @@ module GraphQL
           # build leaf results
           resolved_sources.each_with_index do |val, i|
             # DANGER: HOT PATH!
-            parent_responses[i][field_key] = if val.nil? || val.is_a?(StandardError)
-              build_missing_value(exec_field, field_type, val)
-            elsif return_type.kind.leaf?
-              coerce_leaf_value(exec_field, field_type, val)
-            else
-              val
-            end
+            parent_responses[i][field_key] = coerce_leaf_value(exec_field, field_type, val)
           end
         end
       end

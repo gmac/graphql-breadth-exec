@@ -50,7 +50,9 @@ module GraphQL::Cardinal
       # DANGER: HOT PATH!
       # Overhead added here scales dramatically...
       def coerce_leaf_value(exec_field, current_type, val)
-        if current_type.list?
+        if val.nil? || val.is_a?(StandardError)
+          build_missing_value(exec_field, current_type, val)
+        elsif current_type.list?
           unless val.is_a?(Array)
             report_exception("#{INCORRECT_LIST_VALUE}#{val.class}", field: exec_field)
             return build_missing_value(exec_field, current_type, nil)
