@@ -4,7 +4,7 @@ require_relative "./executor/execution_scope"
 require_relative "./executor/execution_field"
 require_relative "./executor/authorization"
 require_relative "./executor/hot_paths"
-require_relative "./executor/response_hash"
+require_relative "./executor/result_hash"
 require_relative "./executor/error_formatter"
 
 module GraphQL
@@ -42,8 +42,8 @@ module GraphQL
             ExecutionScope.new(
               parent_type: @query.root_type_for_operation(operation.operation_type),
               selections: operation.selections,
-              sources: [@root_object],
-              responses: [@data],
+              objects: [@root_object],
+              results: [@data],
             )
           ]
         when "mutation"
@@ -53,8 +53,8 @@ module GraphQL
             ExecutionScope.new(
               parent_type: mutation_type,
               selections: exec_field.nodes,
-              sources: [@root_object],
-              responses: [@data],
+              objects: [@root_object],
+              results: [@data],
             )
           end
         else
@@ -67,9 +67,9 @@ module GraphQL
           execute_scope(@exec_queue.shift) until @exec_queue.empty?
         end
 
-        response = { "data" => @errors.empty? ? @data : ErrorFormatter.new(@query, @data, @errors).perform }
-        response["errors"] = @errors.map(&:to_h) unless @errors.empty?
-        response
+        result = { "data" => @errors.empty? ? @data : ErrorFormatter.new(@query, @data, @errors).perform }
+        result["errors"] = @errors.map(&:to_h) unless @errors.empty?
+        result
       end
 
       private
@@ -79,7 +79,7 @@ module GraphQL
           exec_scope.fields = execution_fields_by_key(exec_scope.parent_type, exec_scope.selections)
           exec_scope.fields.each_value do |exec_field|
             parent_type = exec_scope.parent_type
-            parent_sources = exec_scope.sources
+            parent_objects = exec_scope.objects
             field_name = exec_field.name
 
             exec_field.scope = exec_scope
@@ -97,20 +97,20 @@ module GraphQL
 
             exec_field.result = if !field_resolver.authorized?(@context)
               @errors << AuthorizationError.new(type_name: parent_type.graphql_name, field_name: field_name, path: exec_field.path, base: true)
-              Array.new(parent_sources.length, @errors.last)
+              Array.new(parent_objects.length, @errors.last)
             elsif !Authorization.can_access_type?(value_type, @context)
               @errors << AuthorizationError.new(type_name: value_type.graphql_name, path: exec_field.path, base: true)
-              Array.new(parent_sources.length, @errors.last)
+              Array.new(parent_objects.length, @errors.last)
             else
               begin
-                @tracers.each { _1.before_resolve_field(parent_type, field_name, parent_sources.length, @context) }
-                field_resolver.resolve(parent_sources, exec_field.arguments(@variables), @context, exec_scope)
+                @tracers.each { _1.before_resolve_field(parent_type, field_name, parent_objects.length, @context) }
+                field_resolver.resolve(parent_objects, exec_field.arguments(@variables), @context, exec_scope)
               rescue StandardError => e
                 report_exception(error: e, field: exec_field)
                 @errors << InternalError.new(path: exec_field.path, base: true)
-                Array.new(parent_sources.length, @errors.last)
+                Array.new(parent_objects.length, @errors.last)
               ensure
-                @tracers.each { _1.after_resolve_field(parent_type, field_name, parent_sources.length, @context) }
+                @tracers.each { _1.after_resolve_field(parent_type, field_name, parent_objects.length, @context) }
                 @exec_count += 1
               end
             end
@@ -121,8 +121,8 @@ module GraphQL
           if exec_scope.lazy_fields_ready?
             exec_scope.send(:lazy_exec!) # << noop for loaders that have already run
             exec_scope.fields.each_value do |exec_field|
-              sources = exec_field.result.is_a?(Promise) ? exec_field.result.value : exec_field.result
-              resolve_execution_field(exec_field, sources)
+              objects = exec_field.result.is_a?(Promise) ? exec_field.result.value : exec_field.result
+              build_execution_field(exec_field, objects)
             end
           else
             # requeue the scope to wait on others that haven't built fields yet
@@ -130,32 +130,35 @@ module GraphQL
           end
         else
           exec_scope.fields.each_value do |exec_field|
-            resolve_execution_field(exec_field, exec_field.result)
+            build_execution_field(exec_field, exec_field.result)
           end
         end
 
         nil
       end
 
-      def resolve_execution_field(exec_field, resolved_sources)
-        parent_sources = exec_field.scope.sources
-        parent_responses = exec_field.scope.responses
+      def build_execution_field(exec_field, resolved_objects)
+        parent_objects = exec_field.scope.objects
+        parent_results = exec_field.scope.results
         field_key = exec_field.key
         field_type = exec_field.type
         return_type = field_type.unwrap
 
-        if resolved_sources.length != parent_sources.length
-          report_exception("Incorrect number of results resolved. Expected #{parent_sources.length}, got #{resolved_sources.length}", field: exec_field)
-          resolved_sources = Array.new(parent_sources.length, nil)
+        if resolved_objects.length != parent_objects.length
+          report_exception("Incorrect number of results resolved. Expected #{parent_objects.length}, got #{resolved_objects.length}", field: exec_field)
+          resolved_objects = Array.new(parent_objects.length, nil)
         end
 
         if return_type.kind.composite?
           # build results with child selections
-          next_sources = []
-          next_responses = []
-          resolved_sources.each_with_index do |source, i|
+          next_objects = []
+          next_results = []
+          i = 0
+          while i < resolved_objects.length
             # DANGER: HOT PATH!
-            parent_responses[i][field_key] = build_composite_response(exec_field, field_type, source, next_sources, next_responses)
+            object = resolved_objects[i]
+            parent_results[i][field_key] = build_composite_result(exec_field, field_type, object, next_objects, next_results)
+            i += 1
           end
 
           if return_type.kind.abstract?
@@ -164,29 +167,33 @@ module GraphQL
               raise NotImplementedError, "No type resolver for `#{return_type.graphql_name}`"
             end
 
-            next_sources_by_type = Hash.new { |h, k| h[k] = [] }
-            next_responses_by_type = Hash.new { |h, k| h[k] = [] }
-            next_sources.each_with_index do |source, i|
+            next_objects_by_type = Hash.new { |h, k| h[k] = [] }
+            next_results_by_type = Hash.new { |h, k| h[k] = [] }
+            
+            i = 0
+            while i < next_objects.length
               # DANGER: HOT PATH!
-              impl_type = type_resolver.call(source, @context)
-              next_sources_by_type[impl_type] << (exec_field.name == TYPENAME_FIELD ? impl_type.graphql_name : source)
-              next_responses_by_type[impl_type] << next_responses[i].tap { |r| r.typename = impl_type.graphql_name }
+              object = next_objects[i]
+              impl_type = type_resolver.call(object, @context)
+              next_objects_by_type[impl_type] << (exec_field.name == TYPENAME_FIELD ? impl_type.graphql_name : object)
+              next_results_by_type[impl_type] << next_results[i].tap { |r| r.typename = impl_type.graphql_name }
+              i += 1
             end
 
             loader_cache = {} # << all scopes in the abstract generation share a loader cache
             loader_group = []
-            next_sources_by_type.each do |impl_type, impl_type_sources|
+            next_objects_by_type.each do |impl_type, impl_type_objects|
               # check concrete type access only once per resolved type...
               unless Authorization.can_access_type?(impl_type, @context)
                 @errors << AuthorizationError.new(type_name: impl_type.graphql_name, path: exec_field.path, base: true)
-                impl_type_sources = Array.new(impl_type_sources.length, @errors.last)
+                impl_type_objects = Array.new(impl_type_objects.length, @errors.last)
               end
 
               loader_group << ExecutionScope.new(
                 parent_type: impl_type,
                 selections: exec_field.selections,
-                sources: impl_type_sources,
-                responses: next_responses_by_type[impl_type],
+                objects: impl_type_objects,
+                results: next_results_by_type[impl_type],
                 loader_cache: loader_cache,
                 loader_group: loader_group,
                 path: exec_field.path,
@@ -199,17 +206,20 @@ module GraphQL
             @exec_queue << ExecutionScope.new(
               parent_type: return_type,
               selections: exec_field.selections,
-              sources: next_sources,
-              responses: next_responses,
+              objects: next_objects,
+              results: next_results,
               path: exec_field.path,
               parent: exec_field.scope,
             )
           end
         else
           # build leaf results
-          resolved_sources.each_with_index do |val, i|
+          i = 0
+          while i < resolved_objects.length
             # DANGER: HOT PATH!
-            parent_responses[i][field_key] = coerce_leaf_value(exec_field, field_type, val)
+            val = resolved_objects[i]
+            parent_results[i][field_key] = build_leaf_result(exec_field, field_type, val)
+            i += 1
           end
         end
       end
