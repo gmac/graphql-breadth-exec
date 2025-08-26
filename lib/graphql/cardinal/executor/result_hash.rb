@@ -2,7 +2,7 @@
 
 module GraphQL::Cardinal
   class Executor
-    class ResponseHash < Hash
+    class ResultHash < Hash
       attr_accessor :typename
     end
   end

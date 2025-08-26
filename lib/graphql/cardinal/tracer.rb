@@ -7,12 +7,12 @@ module GraphQL
         @time = nil
       end
 
-      def before_resolve_field(parent_type, field_name, sources_count, context)
+      def before_resolve_field(parent_type, field_name, objects_count, context)
         @time = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
-      def after_resolve_field(parent_type, field_name, sources_count, context)
-        (Process.clock_gettime(Process::CLOCK_MONOTONIC) - @time) / sources_count
+      def after_resolve_field(parent_type, field_name, objects_count, context)
+        (Process.clock_gettime(Process::CLOCK_MONOTONIC) - @time) / objects_count
       end
     end
   end

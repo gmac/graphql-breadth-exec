@@ -12,14 +12,14 @@ module GraphQL
 
         class TypesResolver < FieldResolver
           def resolve(objects, _args, ctx, _exec_field)
-            types = ctx.query.types.all_types
+            types = ctx.types.all_types
             Array.new(objects.length, types)
           end
         end
 
         class DirectivesResolver < FieldResolver
           def resolve(objects, _args, ctx, _exec_field)
-            directives = ctx.query.types.directives
+            directives = ctx.types.directives
             Array.new(objects.length, directives)
           end
         end
@@ -35,7 +35,7 @@ module GraphQL
 
         class TypeKindResolver < FieldResolver
           def resolve(objects, _args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               type.kind.name
             end
           end
@@ -43,9 +43,9 @@ module GraphQL
 
         class EnumValuesResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               if type.kind.enum?
-                enum_values = ctx.query.types.enum_values(type)
+                enum_values = ctx.types.enum_values(type)
                 enum_values = enum_values.reject(&:deprecation_reason) unless args["includeDeprecated"]
                 enum_values
               end
@@ -55,9 +55,9 @@ module GraphQL
 
         class FieldsResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               if type.kind.fields?
-                fields = ctx.query.types.fields(type)
+                fields = ctx.types.fields(type)
                 fields = fields.reject(&:deprecation_reason) unless args["includeDeprecated"]
                 fields
               end
@@ -67,9 +67,9 @@ module GraphQL
 
         class InputFieldsResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               if type.kind.input_object?
-                fields = ctx.query.types.arguments(type)
+                fields = ctx.types.arguments(type)
                 fields = fields.reject(&:deprecation_reason) unless args["includeDeprecated"]
                 fields
               end
@@ -79,15 +79,15 @@ module GraphQL
 
         class InterfacesResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
-              ctx.query.types.interfaces(type) if type.kind.fields?
+            map_objects(objects) do |type|
+              ctx.types.interfaces(type) if type.kind.fields?
             end
           end
         end
 
         class PossibleTypesResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               ctx.query.possible_types(type) if type.kind.abstract?
             end
           end
@@ -95,7 +95,7 @@ module GraphQL
 
         class OfTypeResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               type.of_type if type.kind.wraps?
             end
           end
@@ -103,7 +103,7 @@ module GraphQL
 
         class SpecifiedByUrlResolver < FieldResolver
           def resolve(objects, args, ctx, _exec_field)
-            map_sources(objects) do |type|
+            map_objects(objects) do |type|
               type.specified_by_url if type.kind.scalar?
             end
           end
@@ -112,8 +112,8 @@ module GraphQL
 
       class ArgumentsResolver < FieldResolver
         def resolve(objects, args, ctx, _exec_field)
-          map_sources(objects) do |owner|            
-            owner_args = ctx.query.types.arguments(owner)
+          map_objects(objects) do |owner|            
+            owner_args = ctx.types.arguments(owner)
             owner_args = owner_args.reject(&:deprecation_reason) unless args["includeDeprecated"]
             owner_args
           end
@@ -124,7 +124,7 @@ module GraphQL
         def resolve(objects, args, ctx, _exec_field)
           builder = nil
           printer = nil
-          map_sources(objects) do |arg|
+          map_objects(objects) do |arg|
             next nil unless arg.default_value?
 
             builder ||= GraphQL::Language::DocumentFromSchemaDefinition.new(ctx.query.schema, context: ctx)
@@ -136,7 +136,7 @@ module GraphQL
 
       class IsDeprecatedResolver < FieldResolver
         def resolve(objects, args, ctx, _exec_field)
-          map_sources(objects) { !!_1.deprecation_reason }
+          map_objects(objects) { !!_1.deprecation_reason }
         end
       end
 

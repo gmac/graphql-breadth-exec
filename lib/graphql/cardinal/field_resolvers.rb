@@ -11,7 +11,7 @@ module GraphQL
         raise NotImplementedError, "Resolver#resolve must be implemented."
       end
 
-      def map_sources(objects)
+      def map_objects(objects)
         objects.map do |obj|
           yield(obj)
         rescue StandardError => e
@@ -30,7 +30,7 @@ module GraphQL
       end
 
       def resolve(objects, _args, _ctx, _scope)
-        map_sources(objects) do |hash|
+        map_objects(objects) do |hash|
           hash[@key]
         end
       end
@@ -42,7 +42,7 @@ module GraphQL
       end
 
       def resolve(objects, _args, _ctx, _scope)
-        map_sources(objects) do |obj|
+        map_objects(objects) do |obj|
           obj.public_send(@name)
         end
       end
@@ -51,7 +51,7 @@ module GraphQL
     class TypenameResolver < FieldResolver
       def resolve(objects, _args, _ctx, scope)
         typename = scope.parent_type.graphql_name.freeze
-        map_sources(objects) { typename }
+        map_objects(objects) { typename }
       end
     end
   end

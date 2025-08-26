@@ -3,14 +3,14 @@
 module GraphQL::Cardinal
   class Executor
     class ExecutionScope
-      attr_reader :parent_type, :selections, :sources, :responses, :path, :parent
+      attr_reader :parent_type, :selections, :objects, :results, :path, :parent
       attr_accessor :fields
 
       def initialize(
         parent_type:,
         selections:,
-        sources:,
-        responses:,
+        objects:,
+        results:,
         loader_cache: nil,
         loader_group: nil,
         path: [],
@@ -18,8 +18,8 @@ module GraphQL::Cardinal
       )
         @parent_type = parent_type
         @selections = selections
-        @sources = sources
-        @responses = responses
+        @objects = objects
+        @results = results
         @loader_cache = loader_cache
         @loader_group = loader_group
         @path = path.freeze
