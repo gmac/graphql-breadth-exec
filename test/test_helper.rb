@@ -14,12 +14,12 @@ require 'minitest/pride'
 require 'minitest/autorun'
 require 'minitest/stub_const'
 
-require 'graphql/cardinal'
+require 'graphql/breadth_exec'
 require 'graphql/batch'
 require_relative './fixtures'
 
-def breadth_exec(query, source, variables: {}, context: {}, tracers: [GraphQL::Cardinal::Tracer.new])
-  GraphQL::Cardinal::Executor.new(
+def breadth_exec(query, source, variables: {}, context: {}, tracers: [GraphQL::BreadthExec::Tracer.new])
+  GraphQL::BreadthExec::Executor.new(
     SCHEMA,
     BREADTH_RESOLVERS,
     GraphQL.parse(query),

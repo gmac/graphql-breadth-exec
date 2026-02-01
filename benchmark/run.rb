@@ -3,7 +3,7 @@
 require "debug"
 require "graphql"
 require "graphql/batch"
-require "graphql/cardinal"
+require "graphql/breadth_exec"
 
 require "benchmark/ips"
 require "memory_profiler"
@@ -12,7 +12,7 @@ require_relative '../test/fixtures'
 class GraphQLBenchmark
   DOCUMENT = GraphQL.parse(BASIC_DOCUMENT)
   CARDINAL_SCHEMA = SCHEMA
-  CARDINAL_TRACER = GraphQL::Cardinal::Tracer.new
+  CARDINAL_TRACER = GraphQL::BreadthExec::Tracer.new
 
   class Schema < GraphQL::Schema
     lazy_resolve(Proc, :call)
@@ -46,7 +46,7 @@ class GraphQLBenchmark
           end
 
           x.report("graphql-cardinal #{num_objects} resolvers") do
-            GraphQL::Cardinal::Executor.new(
+            GraphQL::BreadthExec::Executor.new(
               SCHEMA,
               BREADTH_RESOLVERS,
               DOCUMENT,
@@ -79,7 +79,7 @@ class GraphQLBenchmark
           end
 
           x.report("graphql-cardinal: #{num_objects} lazy resolvers") do
-            GraphQL::Cardinal::Executor.new(
+            GraphQL::BreadthExec::Executor.new(
               SCHEMA,
               BREADTH_DEFERRED_RESOLVERS,
               DOCUMENT,
@@ -95,14 +95,14 @@ class GraphQLBenchmark
 
     def benchmark_introspection
       document = GraphQL.parse(GraphQL::Introspection.query)
-      
+
       Benchmark.ips do |x|
         x.report("graphql-ruby: introspection") do
           GRAPHQL_GEM_SCHEMA.execute(document: document)
         end
 
         x.report("graphql-cardinal introspection") do
-          GraphQL::Cardinal::Executor.new(
+          GraphQL::BreadthExec::Executor.new(
             SCHEMA,
             BREADTH_RESOLVERS,
             document,
@@ -131,7 +131,7 @@ class GraphQLBenchmark
 
       with_data_sizes(sizes) do |data_source, num_objects|
         report = MemoryProfiler.report do
-          GraphQL::Cardinal::Executor.new(
+          GraphQL::BreadthExec::Executor.new(
             SCHEMA,
             BREADTH_RESOLVERS,
             DOCUMENT,
