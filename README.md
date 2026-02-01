@@ -2,13 +2,15 @@
 
 _**The original prototype of the core algorithm for Shopify's _GraphQL Cardinal_ engine**_
 
+GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
+
 ![Breadth/Depth](./images/graphql-axes.png)
 
-GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
+Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. To execute _breadth-first_, we instead resolve each selection depth only once with an aggregated breadth of objects, so resolver overhead now scales by **depth-only**.
 
 ![Execution flows](./images/exec-flow.png)
 
-Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. To execute _breadth-first_, we instead resolve each selection depth only once with an aggregated breadth of objects, so resolver overhead now scales by **depth-only**. This makes processing list repetitions considerably faster.
+The breadth-first design makes processing list repetitions considerably faster.
 
 ```shell
 graphql-ruby (depth): 140002 resolvers
