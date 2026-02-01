@@ -43,18 +43,18 @@ This means all field instances are inherently batched as a function of the engin
 
 **Scenario:** we resolve five fields (_depth_) across a list of 1000 objects (_breadth_).
 
-* In depth-first execution, we call 5000 field resolvers (_depth × breadth_) and incur `5s` of cost.
-* In breadth-first execution, we call 5 field resolvers (_depth-only_) and incur only `5ms`.
+* depth-first: we call 5000 field resolvers (_depth × breadth_) and incur `5s` of cost.
+* breadth-first: we call 5 field resolvers (_depth-only_) and incur only `5ms`.
 
 Now assume each field operates lazily and returns a promise:
 
-* In depth-first execution, we build and resolve 5000 intermediary promises (_depth × breadth_).
-* In breadth-first execution, we build and resolve 5 intermediary promises (_depth-only_).
+* depth-first: we build and resolve 5000 intermediary promises (_depth × breadth_).
+* breadth-first: we build and resolve 5 intermediary promises (_depth-only_).
 
 Now assume we chain a `.then` onto the lazy promise resolution:
 
-* In depth-first execution, we build and resolve 10,000 intermediary promises (_depth × breadth × 2_).
-* In breadth-first execution, we build and resolve 10 intermediary promises (_depth × 2_).
+* depth-first: we build and resolve 10,000 intermediary promises (_depth × breadth × 2_).
+* breadth-first: we build and resolve 10 intermediary promises (_depth × 2_).
 
 ## Prototype usage
 
