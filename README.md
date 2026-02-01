@@ -1,6 +1,6 @@
 # Breadth-first GraphQL execution
 
-_**The original algorithm proof-of-concept for Shopify's _GraphQL Cardinal_ engine**_
+_**The proof-of-concept algorithm for Shopify's _GraphQL Cardinal_ engine**_
 
 GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
 
