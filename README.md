@@ -6,22 +6,22 @@ _**The original prototype of the core algorithm for Shopify's _GraphQL Cardinal_
 
 GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
 
-![Execution flows](./images/exec-flows.png)
+![Execution flows](./images/exec-flow.png)
 
-Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. To execute _breadth-first_, we instead resolve each selection position spanning depth only once with an aggregated breadth of objects. Now resolver overhead only scales by the static depth of the document, and processing list repetitions becomes considerably faster.
+Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. To execute _breadth-first_, we instead resolve each selection depth only once with an aggregated breadth of objects, so resolver overhead now scales by **depth-only**. This makes processing list repetitions considerably faster.
 
 ```shell
-graphql-ruby: 140002 resolvers
+graphql-ruby (depth): 140002 resolvers
    1.087 (± 0.0%) i/s  (919.76 ms/i) -  6.000 in  5.526807s
 graphql-breadth_exec 140002 resolvers
    21.314 (± 9.4%) i/s   (46.92 ms/i) -  108.000 in  5.095015s
 
 Comparison:
 graphql-breadth_exec 140002 resolvers:   21.3 i/s
-graphql-ruby: 140002 resolvers:   1.1 i/s - 19.60x  slower
+graphql-ruby (depth): 140002 resolvers:   1.1 i/s - 19.60x  slower
 ```
 
-## Breadth means native batching
+## Batching advantages
 
 Breadth-first resolvers look a little different than we're used to: they recieve `objects` and return a mapped set.
 
@@ -31,7 +31,7 @@ def resolve(objects, args, cxt)
 end
 ```
 
-In effect, all field instances are automatically batched without the use of DataLoader. However, we frequently need to batch work across field instances (ex: same field using different aliases, different fields sharing a query, etc.), which still involves DataLoader promises. Breadth is still remarkably efficient at this because it can bind many object loads to a single promise, versus resolving a promise per loaded object
+This means all field instances are inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.), and they can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
 
 ![Promises](./images/promises.png)
 
