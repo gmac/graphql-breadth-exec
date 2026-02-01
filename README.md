@@ -35,9 +35,9 @@ This means all field instances are inherently batched as a function of the engin
 
 ![Promises](./images/promises.png)
 
-## API
+## Prototype usage
 
-Setup a `GraphQL::BreadthExec::FieldResolver`:
+This is an extremely early prototype that demonstrates basic breadth-first concepts. It outlines the core engine flow using batched sets, and includes a basic scope-local promissory workflow. These patterns are being matured for real production use in [graphql-ruby](https://github.com/rmosolgo/graphql-ruby/pull/5509). To experiment with this prototype, you can setup a `GraphQL::BreadthExec::FieldResolver`:
 
 ```ruby
 class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
