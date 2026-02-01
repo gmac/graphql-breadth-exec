@@ -2,15 +2,15 @@
 
 _**The proof-of-concept algorithm for Shopify's _GraphQL Cardinal_ engine**_
 
-GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
+GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of response data (and can grow extremely large).
 
 ![Breadth/Depth](./images/graphql-axes.png)
 
-Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. To execute _breadth-first_, we instead resolve each selection depth only once with an aggregated breadth of objects, so resolver overhead now scales by **depth-only**.
+Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. By executing _breadth-first_, we instead resolve each selection depth only once with an aggregated set of objects, so resolver overhead scales by **depth-only**.
 
 ![Execution flows](./images/exec-flow.png)
 
-The breadth-first design makes processing list repetitions considerably faster.
+This breadth-first design makes processing list repetitions considerably faster.
 
 ```shell
 graphql-ruby (depth): 140002 resolvers
@@ -33,7 +33,7 @@ def resolve(objects, args, cxt)
 end
 ```
 
-This means all field instances are inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.). Promise patterns can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
+This makes all field instances inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.). Promise patterns can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
 
 ![Promises](./images/promises.png)
 
@@ -43,8 +43,8 @@ This means all field instances are inherently batched as a function of the engin
 
 **Scenario:** we resolve five fields (_depth_) across a list of 1000 objects (_breadth_).
 
-* depth-first: we call 5000 field resolvers (_depth × breadth_) and incur `5s` of cost.
-* breadth-first: we call 5 field resolvers (_depth-only_) and incur only `5ms`.
+* depth-first: we call 5000 field resolvers (_depth × breadth_) and incur `5s` (5 × 1000 × 1ms).
+* breadth-first: we call 5 field resolvers (_depth-only_) and incur only `5ms` (5 × 1ms).
 
 Now assume each field operates lazily and returns a promise:
 
@@ -58,7 +58,7 @@ Now assume we chain a `.then` onto the lazy promise resolution:
 
 ## Prototype usage
 
-This is an extremely early prototype that demonstrates basic breadth-first concepts. It outlines the core engine flow using batched sets, and includes a basic many-to-one promissory workflow. These patterns are being matured for real production use in [graphql-ruby](https://github.com/rmosolgo/graphql-ruby/pull/5509). To experiment with this prototype, you can setup a `GraphQL::BreadthExec::FieldResolver`:
+This is an extremely early proof-of-concept that demonstrates basic breadth-first concepts. It outlines a core engine flow using batched sets, and includes a basic many-to-one promissory workflow. These patterns have matured into Shopify's GraphQL Cardinal engine that now runs much of their production traffic; these patterns are also being matured for the open source community in [graphql-ruby](https://github.com/rmosolgo/graphql-ruby/pull/5509). To experiment with this prototype, you can setup a `GraphQL::BreadthExec::FieldResolver`:
 
 ```ruby
 class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
