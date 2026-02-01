@@ -1,6 +1,6 @@
 # Breadth-first GraphQL execution
 
-_**The original prototype of the core algorithm for Shopify's _GraphQL Cardinal_ engine**_
+_**The original algorithm proof-of-concept for Shopify's _GraphQL Cardinal_ engine**_
 
 GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
 
@@ -36,6 +36,25 @@ end
 This means all field instances are inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.), and they can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
 
 ![Promises](./images/promises.png)
+
+## Napkin math
+
+**Assumption:** all GraphQL fields have some non-zero overhead cost associated with their execution. For simplicity, let's round up and say this cost is `1ms`.
+
+**Scenario:** we resolve five fields (_depth_) across a list of 1000 objects (_breadth_).
+
+* In depth-first execution, we call 5000 field resolvers (_depth × breadth_) and incur `5s` of cost.
+* In breadth-first execution, we call 5 field resolvers (_depth-only_) and incur only `5ms`.
+
+Now assume each field operates lazily and returns a promise:
+
+* In depth-first execution, we build and resolve 5000 intermediary promises (_depth × breadth_).
+* In breadth-first execution, we build and resolve 5 intermediary promises (_depth-only_).
+
+Now assume we chain a `.then` onto the lazy promise resolution:
+
+* In depth-first execution, we build and resolve 10,000 intermediary promises (_depth × breadth × 2_).
+* In breadth-first execution, we build and resolve 10 intermediary promises (_depth × 2_).
 
 ## Prototype usage
 
