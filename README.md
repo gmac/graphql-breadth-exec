@@ -33,7 +33,7 @@ def resolve(objects, args, cxt)
 end
 ```
 
-This means all field instances are inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.), and they can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
+This means all field instances are inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.). Promise patterns can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
 
 ![Promises](./images/promises.png)
 
