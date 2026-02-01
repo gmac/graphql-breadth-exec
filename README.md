@@ -1,8 +1,14 @@
 # Breadth-first GraphQL execution
 
-_**The original core algorithm prototype of Shopify's GraphQL Cardinal engine**_
+_**The original prototype of the core algorithm for Shopify's _GraphQL Cardinal_ engine**_
 
-Traditional GraphQL implementations execute depth-first, which resolves every field of every object in the response, making resolver actions scale by depth x breadth. In breadth-first execution, we visit every _selection position_ once with an aggregated set of objects. The breadth-first approach is much faster at processing list repetitions due to fewer resolver calls and intermediary promises.
+![Breadth/Depth](./images/graphql-axes.png)
+
+GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of the response data (and can grow extremely large).
+
+![Execution flows](./images/exec-flows.png)
+
+Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. To execute _breadth-first_, we instead resolve each selection position spanning depth only once with an aggregated breadth of objects. Now resolver overhead only scales by the static depth of the document, and processing list repetitions becomes considerably faster.
 
 ```shell
 graphql-ruby: 140002 resolvers
@@ -15,17 +21,9 @@ graphql-breadth_exec 140002 resolvers:   21.3 i/s
 graphql-ruby: 140002 resolvers:   1.1 i/s - 19.60x  slower
 ```
 
-## Understanding breadth execution
+## Breadth means native batching
 
-GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the size of the response data (and can grow extremely large).
-
-![Breadth/Depth](./images/breadth-depth.png)
-
-Depth-first execution (the conventional GraphQL execution strategy) resolves every field of every object in the response using individual subtree traversals. This overhead scales as the response size grows, and balloons quickly with added field tracing.
-
-![Depth](./images/depth-first.png)
-
-By comparison, breadth-first resolvers look a little different than we're used to: they recieve `objects` and return a mapped set.
+Breadth-first resolvers look a little different than we're used to: they recieve `objects` and return a mapped set.
 
 ```ruby
 def resolve(objects, args, cxt)
@@ -33,11 +31,7 @@ def resolve(objects, args, cxt)
 end
 ```
 
-Breadth-first then runs a single resolver per document selection, and coalesces an array of sources to pass down to the next generation. Now resolver overhead scales by the size of the request document rather than the size of the response data.
-
-![Breadth](./images/breadth-first.png)
-
-While bigger responses will always take longer to process, the workload is in your own business logic with very little GraphQL execution overhead. The other superpower of breadth execution is its ability to reduce promise overhead. Individual fields arrive batched by default, then when multiple fields pool loading, entire breadth sets can be bound to a single promise rather than building promises for each item in the set.
+In effect, all field instances are automatically batched without the use of DataLoader. However, we frequently need to batch work across field instances (ex: same field using different aliases, different fields sharing a query, etc.), which still involves DataLoader promises. Breadth is still remarkably efficient at this because it can bind many object loads to a single promise, versus resolving a promise per loaded object
 
 ![Promises](./images/promises.png)
 
