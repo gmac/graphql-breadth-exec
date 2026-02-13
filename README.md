@@ -33,7 +33,7 @@ def resolve(objects, args, cxt)
 end
 ```
 
-This makes all field instances inherently batched as a function of the engine without using DataLoader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.). Promise patterns can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
+This makes all field instances inherently batched as a function of the engine without using Dataloader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.). Promise patterns can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
 
 ![Promises](./images/promises.png)
 
@@ -56,9 +56,19 @@ Now assume we chain a `.then` onto the lazy promise resolution:
 * depth-first: we build and resolve 10,000 intermediary promises (_depth × breadth × 2_).
 * breadth-first: we build and resolve 10 intermediary promises (_depth × 2_).
 
+## Noteworthy design patterns
+
+- Fields are resolved breadth-first using implicitly batched resolvers (no Dataloader). These run longer and hotter on application logic with no execution overhead.
+- Stack profiling becomes much more organized with a linear flow and aggregate field spans, rather than fields getting split up across subtree repetitions.
+- Batched resolvers may bind entire load sets to a single lazy promise to dramatically reduce promise bloat.
+- The engine is driven by enqueuing rather than recursion, which shrinks stack traces and reduces memory usage.
+- Error handling is isolated into a second pass that only runs when errors occur. The engine collects all errors, and formatting grooms which ones to return.
+
+This repo is an extremely early proof-of-concept of these patterns. This core engine flow has matured into Shopify's GraphQL Cardinal engine that now runs much of their production traffic; these patterns are also being matured for the open source community in [graphql-ruby](https://github.com/rmosolgo/graphql-ruby/pull/5509).
+
 ## Prototype usage
 
-This is an extremely early proof-of-concept that demonstrates basic breadth-first concepts. It outlines a core engine flow using batched sets, and includes a basic many-to-one promissory workflow. These patterns have matured into Shopify's GraphQL Cardinal engine that now runs much of their production traffic; these patterns are also being matured for the open source community in [graphql-ruby](https://github.com/rmosolgo/graphql-ruby/pull/5509). To experiment with this prototype, you can setup a `GraphQL::BreadthExec::FieldResolver`:
+To experiment with this prototype, you can setup a `GraphQL::BreadthExec::FieldResolver`:
 
 ```ruby
 class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
