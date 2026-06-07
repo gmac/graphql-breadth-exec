@@ -2,7 +2,7 @@
 
 _**The proof-of-concept algorithm for Shopify's _GraphQL Cardinal_ engine**_
 
-_For a typescipt port of the final engine code, see [graphql-breadth-js](https://github.com/gmac/graphql-breadth-js). 
+_For a typescipt port of the final engine code, see [graphql-breadth-js](https://github.com/gmac/graphql-breadth-js)._
 
 GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of response data (and can grow extremely large).
 
