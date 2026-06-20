@@ -12,6 +12,11 @@ Rake::TestTask.new(:test) do |t, args|
   t.test_files = FileList["test/**/*_test.rb"]
 end
 
+desc "Typecheck with Sorbet"
+task :tc do
+  sh "bundle exec srb tc"
+end
+
 # Load rake tasks from lib/tasks
 Dir.glob("lib/tasks/*.rake").each { |r| load r }
 
@@ -36,6 +41,24 @@ namespace :benchmark do
   task :introspection do
     prepare_benchmark
     GraphQLBenchmark.benchmark_introspection
+  end
+
+  desc "Benchmark GraphQL Ruby resolve_batch against breadth_exec"
+  task :resolve_batch do
+    prepare_benchmark
+    GraphQLBenchmark.benchmark_resolve_batch
+  end
+
+  desc "Benchmark lazy scalar fields"
+  task :lazy_scalars do
+    prepare_benchmark
+    GraphQLBenchmark.benchmark_lazy_scalars
+  end
+
+  desc "Benchmark one lazy scalar field across many objects"
+  task :lazy_field_batch do
+    prepare_benchmark
+    GraphQLBenchmark.benchmark_lazy_field_batch
   end
 
   desc "Memory profile"

@@ -26,4 +26,30 @@ class GraphQL::BreadthExec::Executor::ArgumentsTest < Minitest::Test
     expected = { "writeValue" => { "value" => "success!" } }
     assert_equal expected, breadth_exec(document, source, variables: { value: "success!" }).dig("data")
   end
+
+  def test_invalid_field_arguments_are_reported_then_raised_during_execution
+    result = nil
+
+    reported = assert_error_reported(GraphQL::BreadthExec::InputValidationErrorSet) do
+      result = breadth_exec(
+        %|mutation { writeValue { value } }|,
+        { "writeValue" => { "value" => "unchanged" } },
+      )
+    end
+
+    assert_equal ["Argument \"value\" of required type \"String!\" was not provided."], reported.errors.map(&:message)
+    assert_equal(
+      {
+        "errors" => [
+          {
+            "message" => "Argument \"value\" of required type \"String!\" was not provided.",
+            "locations" => [{ "line" => 1, "column" => 12 }],
+            "path" => ["writeValue"],
+          },
+        ],
+        "data" => { "writeValue" => nil },
+      },
+      result,
+    )
+  end
 end

@@ -5,129 +5,112 @@ module GraphQL
     module Introspection
       module Schema
         class EndpointResolver < FieldResolver
-          def resolve(objects, _args, ctx, _exec_field)
-            Array.new(objects.length, ctx.query.schema)
+          def resolve(exec_field, ctx)
+            exec_field.resolve_all(ctx.schema)
           end
         end
 
         class TypesResolver < FieldResolver
-          def resolve(objects, _args, ctx, _exec_field)
-            types = ctx.types.all_types
-            Array.new(objects.length, types)
+          def resolve(exec_field, ctx)
+            exec_field.resolve_all(ctx.types.all_types)
           end
         end
 
         class DirectivesResolver < FieldResolver
-          def resolve(objects, _args, ctx, _exec_field)
-            directives = ctx.types.directives
-            Array.new(objects.length, directives)
+          def resolve(exec_field, ctx)
+            exec_field.resolve_all(ctx.types.directives)
           end
         end
       end
 
       module Type
         class EndpointResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            type = ctx.query.get_type(args["name"])
-            Array.new(objects.length, type)
+          def resolve(exec_field, ctx)
+            exec_field.resolve_all(ctx.types.type(exec_field.arguments[:name]))
           end
         end
 
         class TypeKindResolver < FieldResolver
-          def resolve(objects, _args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              type.kind.name
-            end
+          def resolve(exec_field, _ctx)
+            exec_field.map_objects { |type| type.kind.name }
           end
         end
 
         class EnumValuesResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              if type.kind.enum?
-                enum_values = ctx.types.enum_values(type)
-                enum_values = enum_values.reject(&:deprecation_reason) unless args["includeDeprecated"]
-                enum_values
-              end
+          def resolve(exec_field, ctx)
+            exec_field.map_objects do |type|
+              next unless type.kind.enum?
+
+              values = ctx.types.enum_values(type)
+              exec_field.arguments[:include_deprecated] ? values : values.reject(&:deprecation_reason)
             end
           end
         end
 
         class FieldsResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              if type.kind.fields?
-                fields = ctx.types.fields(type)
-                fields = fields.reject(&:deprecation_reason) unless args["includeDeprecated"]
-                fields
-              end
+          def resolve(exec_field, ctx)
+            exec_field.map_objects do |type|
+              next unless type.kind.fields?
+
+              fields = ctx.types.fields(type)
+              exec_field.arguments[:include_deprecated] ? fields : fields.reject(&:deprecation_reason)
             end
           end
         end
 
         class InputFieldsResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              if type.kind.input_object?
-                fields = ctx.types.arguments(type)
-                fields = fields.reject(&:deprecation_reason) unless args["includeDeprecated"]
-                fields
-              end
+          def resolve(exec_field, ctx)
+            exec_field.map_objects do |type|
+              next unless type.kind.input_object?
+
+              fields = ctx.types.arguments(type)
+              exec_field.arguments[:include_deprecated] ? fields : fields.reject(&:deprecation_reason)
             end
           end
         end
 
         class InterfacesResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              ctx.types.interfaces(type) if type.kind.fields?
-            end
+          def resolve(exec_field, ctx)
+            exec_field.map_objects { |type| ctx.types.interfaces(type) if type.kind.fields? }
           end
         end
 
         class PossibleTypesResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              ctx.query.possible_types(type) if type.kind.abstract?
-            end
+          def resolve(exec_field, ctx)
+            exec_field.map_objects { |type| ctx.types.possible_types(type) if type.kind.abstract? }
           end
         end
 
         class OfTypeResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              type.of_type if type.kind.wraps?
-            end
+          def resolve(exec_field, _ctx)
+            exec_field.map_objects { |type| type.of_type if type.kind.wraps? }
           end
         end
 
         class SpecifiedByUrlResolver < FieldResolver
-          def resolve(objects, args, ctx, _exec_field)
-            map_objects(objects) do |type|
-              type.specified_by_url if type.kind.scalar?
-            end
+          def resolve(exec_field, _ctx)
+            exec_field.map_objects { |type| type.specified_by_url if type.kind.scalar? }
           end
         end
       end
 
       class ArgumentsResolver < FieldResolver
-        def resolve(objects, args, ctx, _exec_field)
-          map_objects(objects) do |owner|
-            owner_args = ctx.types.arguments(owner)
-            owner_args = owner_args.reject(&:deprecation_reason) unless args["includeDeprecated"]
-            owner_args
+        def resolve(exec_field, ctx)
+          exec_field.map_objects do |owner|
+            args = ctx.types.arguments(owner)
+            exec_field.arguments[:include_deprecated] ? args : args.reject(&:deprecation_reason)
           end
         end
       end
 
       class ArgumentDefaultValueResolver < FieldResolver
-        def resolve(objects, args, ctx, _exec_field)
+        def resolve(exec_field, ctx)
           builder = nil
           printer = nil
-          map_objects(objects) do |arg|
+          exec_field.map_objects do |arg|
             next nil unless arg.default_value?
 
-            builder ||= GraphQL::Language::DocumentFromSchemaDefinition.new(ctx.query.schema, context: ctx)
+            builder ||= GraphQL::Language::DocumentFromSchemaDefinition.new(ctx.schema, context: ctx)
             printer ||= GraphQL::Language::Printer.new
             printer.print(builder.build_default_value(arg.default_value, arg.type))
           end
@@ -135,10 +118,18 @@ module GraphQL
       end
 
       class IsDeprecatedResolver < FieldResolver
-        def resolve(objects, args, ctx, _exec_field)
-          map_objects(objects) { !!_1.deprecation_reason }
+        def resolve(exec_field, _ctx)
+          exec_field.map_objects { !!_1.deprecation_reason }
         end
       end
+
+      class TypenameResolver < FieldResolver
+        def resolve(exec_field, _ctx)
+          exec_field.resolve_all(exec_field.scope.parent_type.graphql_name)
+        end
+      end
+
+      TYPENAME_RESOLVER = TypenameResolver.new
 
       ENTRYPOINT_RESOLVERS = {
         "__schema" => Schema::EndpointResolver.new,
@@ -194,7 +185,7 @@ module GraphQL
           "isRepeatable" => MethodResolver.new(:repeatable?),
           "locations" => MethodResolver.new(:locations),
           "name" => MethodResolver.new(:graphql_name),
-        }
+        },
       }.freeze
     end
   end

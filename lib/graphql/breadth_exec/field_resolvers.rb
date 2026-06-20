@@ -1,57 +1,95 @@
+# typed: true
 # frozen_string_literal: true
 
 module GraphQL
   module BreadthExec
+    #: [ContextType < GraphQL::Query::Context]
     class FieldResolver
-      def authorized?(_ctx)
-        true
+      #: (Executor::ExecutionField[untyped], ContextType) -> void
+      def plan(_exec_field, _ctx)
+        nil
       end
 
-      def resolve(objects, _args, _ctx, _scope)
+      #: (Executor::ExecutionField[untyped], ContextType) -> (Array[untyped] | ExecutionPromise)
+      def resolve(*)
         raise NotImplementedError, "Resolver#resolve must be implemented."
       end
 
-      def map_objects(objects)
-        objects.map do |obj|
-          yield(obj)
-        rescue StandardError => e
-          handle_positional_error(e, obj)
-        end
+      #: (Executor::ExecutionField[untyped], ContextType) -> (Array[untyped] | ExecutionPromise)
+      def resolve_field(exec_field, ctx)
+        resolve(exec_field, ctx)
       end
 
-      def handle_positional_error(_err, _obj)
-        InternalError.new
+      #: (Array[untyped] | ExecutionPromise) { (Array[untyped]) -> Array[untyped] } -> (Array[untyped] | ExecutionPromise)
+      def handle_resolved(result)
+        if result.is_a?(ExecutionPromise)
+          result.then { |values| yield(values) }
+        else
+          yield(result)
+        end
       end
     end
 
+    #: [ContextType = GraphQL::Query::Context]
     class HashKeyResolver < FieldResolver
+      #: String | Symbol
+      attr_reader :key
+
+      #: (String | Symbol) -> void
       def initialize(key)
         @key = key
       end
 
-      def resolve(objects, _args, _ctx, _scope)
-        map_objects(objects) do |hash|
-          hash[@key]
-        end
+      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      def resolve(exec_field, _ctx)
+        exec_field.map_objects { _1[@key] }
       end
     end
 
+    #: [ContextType = GraphQL::Query::Context]
     class MethodResolver < FieldResolver
-      def initialize(name)
-        @name = name
+      #: type method_name = String | Symbol
+
+      #: (method_name, *method_name, ?fallback: untyped) -> void
+      def initialize(*names, fallback: nil)
+        @names = names
+        @fallback = fallback
       end
 
-      def resolve(objects, _args, _ctx, _scope)
-        map_objects(objects) do |obj|
-          obj.public_send(@name)
+      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      def resolve(exec_field, _ctx)
+        exec_field.map_objects do |obj|
+          @names.reduce(obj) do |memo, name|
+            break @fallback if memo.nil? && !@fallback.nil?
+            break memo if memo.nil?
+
+            memo.public_send(name)
+          end
         end
       end
     end
 
-    class TypenameResolver < FieldResolver
-      def resolve(objects, _args, _ctx, scope)
-        typename = scope.parent_type.graphql_name.freeze
-        map_objects(objects) { typename }
+    #: [ContextType = GraphQL::Query::Context]
+    class SelfResolver < FieldResolver
+      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      def resolve(exec_field, _ctx)
+        exec_field.map_objects(&:itself)
+      end
+    end
+
+    #: [ContextType = GraphQL::Query::Context]
+    class ValueResolver < FieldResolver
+      #: untyped
+      attr_reader :value
+
+      #: (untyped) -> void
+      def initialize(value)
+        @value = value
+      end
+
+      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      def resolve(exec_field, _ctx)
+        exec_field.resolve_all(@value)
       end
     end
   end

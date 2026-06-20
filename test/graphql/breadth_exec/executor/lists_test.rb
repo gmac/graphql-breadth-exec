@@ -2,6 +2,14 @@
 
 require "test_helper"
 
+class ObjectPathResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, _ctx)
+    exec_field.map_objects_with_index do |_object, index|
+      "#{exec_field.scope.object_path(index).join(".")}|#{exec_field.object_path(index).join(".")}"
+    end
+  end
+end
+
 class GraphQL::BreadthExec::Executor::ListsTest < Minitest::Test
   TEST_SCHEMA = GraphQL::Schema.from_definition(%|
     enum WidgetStatus {
@@ -107,6 +115,50 @@ class GraphQL::BreadthExec::Executor::ListsTest < Minitest::Test
     assert_equal expected, result
   end
 
+  def test_builds_exact_object_paths_for_nested_list_objects
+    query = %|{
+      widget {
+        childGroups {
+          title
+        }
+      }
+    }|
+
+    source = {
+      "widget" => {
+        "childGroups" => [
+          [{ "title" => "A" }, { "title" => "B" }],
+          [{ "title" => "C" }],
+        ],
+      },
+    }
+
+    resolvers = TEST_RESOLVERS.merge(
+      "Widget" => TEST_RESOLVERS.fetch("Widget").merge("title" => ObjectPathResolver.new),
+    )
+
+    result = execute_query(query, source, resolvers: resolvers)
+
+    assert_equal(
+      {
+        "data" => {
+          "widget" => {
+            "childGroups" => [
+              [
+                { "title" => "widget.childGroups.0.0|widget.childGroups.0.0.title" },
+                { "title" => "widget.childGroups.0.1|widget.childGroups.0.1.title" },
+              ],
+              [
+                { "title" => "widget.childGroups.1.0|widget.childGroups.1.0.title" },
+              ],
+            ],
+          },
+        },
+      },
+      result,
+    )
+  end
+
   def test_resolves_flat_leaf_lists
     query = %|{
       widget {
@@ -149,7 +201,7 @@ class GraphQL::BreadthExec::Executor::ListsTest < Minitest::Test
 
   private
 
-  def execute_query(document, source, schema: TEST_SCHEMA)
-    GraphQL::BreadthExec::Executor.new(schema, TEST_RESOLVERS, GraphQL.parse(document), source).perform
+  def execute_query(document, source, schema: TEST_SCHEMA, resolvers: TEST_RESOLVERS)
+    GraphQL::BreadthExec::Executor.new(schema, GraphQL.parse(document), resolvers: resolvers, root_object: source).perform
   end
 end

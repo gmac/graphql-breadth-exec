@@ -1,30 +1,68 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 module GraphQL::BreadthExec
   class Executor
     class ErrorFormatter
-      def initialize(query, data, errors)
-        @query = query
-        @data = data
-        @target_paths = errors.map(&:path).tap(&:compact!).tap(&:uniq!)
-        @selection_path = []
-        @actual_path = []
+      class State
+        #: Array[Hash[String, untyped]]
+        attr_reader :errors
+
+        #: error_path
+        attr_reader :actual_path
+
+        #: error_path
+        attr_reader :base_path
+
+        #: (?error_path) -> void
+        def initialize(base_path = EMPTY_ARRAY)
+          @base_path = base_path
+          @actual_path = []
+          @errors = []
+        end
+
+        #: -> error_path
+        def current_path
+          @base_path + @actual_path
+        end
       end
 
-      def perform
-        return @data if @target_paths.empty?
+      #: (
+      #|   executor: Executor,
+      #|   invalidated_results: Hash[untyped, ExecutionError],
+      #|   abstract_result_types: Hash[untyped, singleton(GraphQL::Schema::Object)],
+      #| ) -> void
+      def initialize(executor:, invalidated_results:, abstract_result_types:)
+        @executor = executor
+        @context = executor.context
+        @invalidated_results = invalidated_results
+        @abstract_result_types = abstract_result_types
+      end
 
-        propagate_object_scope_errors(
-          @data,
-          @query.root_type_for_operation(@query.selected_operation.operation_type),
-          @query.selected_operation.selections,
-        )
+      #: (
+      #|   singleton(GraphQL::Schema::Object),
+      #|   Array[selection_node],
+      #|   Hash[String, untyped],
+      #|   ?error_path,
+      #| ) -> [Hash[String, untyped]?, Array[error_hash]]
+      def format_object(parent_type, selections, data, base_path = EMPTY_ARRAY)
+        return [data, EMPTY_ARRAY] if @invalidated_results.empty?
+
+        state = State.new(base_path)
+
+        if (err = @invalidated_results[data])
+          add_formatted_error(err, state)
+          return [nil, state.errors]
+        end
+
+        data = propagate_object_scope_errors(data, parent_type, selections, state)
+        [data, state.errors]
       end
 
       private
 
-      def propagate_object_scope_errors(raw_object, parent_type, selections)
+      #: (untyped, singleton(GraphQL::Schema::Object), Array[selection_node], State) -> untyped
+      def propagate_object_scope_errors(raw_object, parent_type, selections, state)
         return nil if raw_object.nil?
 
         selections.each do |node|
@@ -32,51 +70,43 @@ module GraphQL::BreadthExec
           when GraphQL::Language::Nodes::Field
             field_key = node.alias || node.name
 
-            return raw_object unless @target_paths.any? do |target_path|
-              target_path[@selection_path.length] == field_key && @selection_path.each_with_index.all? do |part, i|
-                part == target_path[i]
-              end
-            end
-
-            @selection_path << field_key
-            @actual_path << field_key
+            state.actual_path << field_key
 
             begin
-              node_type = @query.get_field(parent_type, node.name).type
+              node_type = @context.types.field(parent_type, node.name).type
               named_type = node_type.unwrap
-              raw_value = raw_object[field_key]
+              raw_value = raw_object.fetch(field_key, Executor::UNDEFINED)
+              next if raw_value.equal?(Executor::UNDEFINED)
 
-              raw_object[field_key] = if raw_value.is_a?(ExecutionError)
-                raw_value.replace_path(@actual_path.dup) unless raw_value.base_error?
+              raw_object[field_key] = if (err = @invalidated_results[raw_value])
+                add_formatted_error(err, state)
                 nil
               elsif node_type.list?
-                node_type = node_type.of_type while node_type.non_null?
-                propagate_list_scope_errors(raw_value, node_type, node.selections)
+                propagate_list_scope_errors(raw_value, node_type, node.selections, state)
               elsif named_type.kind.leaf?
                 raw_value
               else
-                propagate_object_scope_errors(raw_value, named_type, node.selections)
+                propagate_object_scope_errors(raw_value, named_type, node.selections, state)
               end
 
               return nil if node_type.non_null? && raw_object[field_key].nil?
             ensure
-              @selection_path.pop
-              @actual_path.pop
+              state.actual_path.pop
             end
 
           when GraphQL::Language::Nodes::InlineFragment
-            fragment_type = node.type ? @query.get_type(node.type.name) : parent_type
-            next unless typename_in_type?(raw_object.typename, fragment_type)
+            fragment_type = node.type ? @context.types.type(node.type.name) : parent_type
+            next unless result_of_type?(raw_object, parent_type, fragment_type)
 
-            result = propagate_object_scope_errors(raw_object, fragment_type, node.selections)
+            result = propagate_object_scope_errors(raw_object, fragment_type, node.selections, state)
             return nil if result.nil?
 
           when GraphQL::Language::Nodes::FragmentSpread
-            fragment = @request.fragment_definitions[node.name]
-            fragment_type = @query.get_type(fragment.type.name)
-            next unless typename_in_type?(raw_object.typename, fragment_type)
+            fragment = @executor.fragments.fetch(node.name)
+            fragment_type = @context.types.type(fragment.type.name)
+            next unless result_of_type?(raw_object, parent_type, fragment_type)
 
-            result = propagate_object_scope_errors(raw_object, fragment_type, fragment.selections)
+            result = propagate_object_scope_errors(raw_object, fragment_type, fragment.selections, state)
             return nil if result.nil?
 
           else
@@ -87,47 +117,56 @@ module GraphQL::BreadthExec
         raw_object
       end
 
-      def propagate_list_scope_errors(raw_list, current_node_type, selections)
+      #: (Array[untyped]?, singleton(GraphQL::Schema::Member), Array[selection_node], State) -> Array[untyped]?
+      def propagate_list_scope_errors(raw_list, current_node_type, selections, state)
         return nil if raw_list.nil?
 
-        current_node_type = current_node_type.of_type while current_node_type.non_null?
-        next_node_type = current_node_type.of_type
-        named_type = next_node_type.unwrap
-        contains_null = false
+        item_node_type = Util.unwrap_non_null(current_node_type).of_type
+        named_type = item_node_type.unwrap
 
-        resolved_list = raw_list.map!.with_index do |raw_list_element, index|
-          @actual_path << index
+        raw_list.map!.with_index do |raw_list_element, index|
+          state.actual_path << index
 
           begin
-            result = if next_node_type.list?
-              propagate_list_scope_errors(raw_list_element, next_node_type, selections)
+            result = if (err = @invalidated_results[raw_list_element])
+              add_formatted_error(err, state)
+              nil
+            elsif item_node_type.list?
+              propagate_list_scope_errors(raw_list_element, item_node_type, selections, state)
             elsif named_type.kind.leaf?
               raw_list_element
             else
-              propagate_object_scope_errors(raw_list_element, named_type, selections)
+              propagate_object_scope_errors(raw_list_element, named_type, selections, state)
             end
 
-            if result.nil?
-              contains_null = true
-              return nil if current_node_type.non_null?
-            end
+            return nil if result.nil? && item_node_type.non_null?
 
             result
           ensure
-            @actual_path.pop
+            state.actual_path.pop
           end
         end
-
-        return nil if contains_null && next_node_type.non_null?
-
-        resolved_list
       end
 
-      def typename_in_type?(typename, type)
-        return true if type.graphql_name == typename
+      #: (untyped, singleton(GraphQL::Schema::Member), singleton(GraphQL::Schema::Member)) -> bool
+      def result_of_type?(result, current_type, inquiry_type)
+        result_type = current_type.kind.abstract? ? @abstract_result_types[result] : current_type
+        raise ImplementationError, "No type annotation recorded for abstract result" if result_type.nil?
 
-        type.kind.abstract? && @query.possible_types(type).any? do |t|
-          t.graphql_name == typename
+        if inquiry_type.kind.abstract?
+          @context.types.possible_types(inquiry_type).include?(result_type)
+        else
+          result_type == inquiry_type
+        end
+      end
+
+      #: (ExecutionError, State) -> void
+      def add_formatted_error(error, state)
+        error.each do |err|
+          next if err.equal?(UNREPORTED_ERROR)
+
+          state.errors << err.to_h.tap { _1["path"] = state.current_path }
+          @context.errors << err.cause if err.cause
         end
       end
     end

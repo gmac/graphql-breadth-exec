@@ -126,9 +126,9 @@ SCHEMA = GraphQL::Schema.from_definition(%|
 
 result = GraphQL::BreadthExec::Executor.new(
    SCHEMA,
-   RESOLVER_MAP,
    GraphQL.parse(query),
-   {}, # root object
+   resolvers: RESOLVER_MAP,
+   root_object: {},
    variables: { ... },
    context: { ... },
    tracers: [ ... ],

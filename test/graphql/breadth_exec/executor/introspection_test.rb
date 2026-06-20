@@ -537,6 +537,6 @@ class GraphQL::BreadthExec::Executor::IntrospectionTest < Minitest::Test
   private
 
   def execute_query(document, schema: TEST_SCHEMA)
-    GraphQL::BreadthExec::Executor.new(schema, TEST_RESOLVERS, GraphQL.parse(document), {}).perform
+    GraphQL::BreadthExec::Executor.new(schema, GraphQL.parse(document), resolvers: TEST_RESOLVERS, root_object: {}).perform
   end
 end

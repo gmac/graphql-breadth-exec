@@ -1,0 +1,6 @@
+--dir
+lib
+--dir
+sorbet/rbi
+--ignore=/test/
+--ignore=/benchmark/
