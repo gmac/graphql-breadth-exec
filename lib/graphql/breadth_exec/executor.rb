@@ -180,7 +180,7 @@ module GraphQL
         @executed = true
 
         # there is no result data until execution starts
-        result_data = Util.deep_copy(UNDEFINED)
+        execution_state = { state: :not_started }
 
         start_time = EMPTY_TIMER
         unless @tracers.empty?
@@ -204,6 +204,7 @@ module GraphQL
 
         execute_with_directives(@planner.root_directives_for_operation(operation)) do
           begin
+            execution_state[:state] = :started
             exec_start_time = EMPTY_TIMER
             unless @tracers.empty?
               exec_start_time = timer
@@ -242,10 +243,8 @@ module GraphQL
               @data, @errors = error_result_formatter.format_object(root_type, root_selections, @data)
             end
             # once execution has completed, result data is the formatted result payload
-            result_data = @data
+            execution_state[:state] = :completed
           rescue Exception => ex
-            # once execution has started, result data is null
-            result_data = nil
             raise ex
           ensure
             unless @tracers.empty?
@@ -255,11 +254,19 @@ module GraphQL
           end
         end
 
-        build_result(data: result_data, errors: @errors)
+        build_result(data: execution_state[:state] == :completed ? @data : UNDEFINED, errors: @errors)
       rescue StandardError => e
         errors = [] #: Array[error_hash]
         handle_or_reraise(e).each { |ex| errors << ex.to_h }
-        build_result(data: result_data, errors:)
+        state = execution_state&.[](:state)
+        data = if state == :completed
+          @data
+        elsif state == :started
+          nil
+        else
+          UNDEFINED
+        end
+        build_result(data:, errors:)
       ensure
         unless @tracers.empty?
           duration = timer(start_time)
@@ -726,7 +733,7 @@ module GraphQL
         current_exec_field = exec_field #: ExecutionField[untyped]?
         propagating = !!exec_field.propagates_null?
         highest_nulled_depth = exec_field.scope.depth
-        highest_list_depth = Util.deep_copy(nil)
+        highest_list_depth = Integer(-1)
 
         while current_exec_field
           if current_exec_field.propagates_null? && propagating
@@ -736,7 +743,7 @@ module GraphQL
           end
 
           if current_exec_field.type.list?
-            highest_list_depth = current_exec_field.scope.depth
+            highest_list_depth = Integer(current_exec_field.scope.depth)
           end
 
           current_exec_field = current_exec_field.scope.parent_field
@@ -746,7 +753,7 @@ module GraphQL
           # Mark the entire executor as aborted when non-null propagation hits the top.
           # This prevents subsequent isolated root scopes (mutations) from running.
           @aborted = true
-        elsif highest_list_depth.nil? || highest_nulled_depth <= highest_list_depth
+        elsif highest_list_depth.negative? || highest_nulled_depth <= highest_list_depth
           # Abort all non-null ancestor scopes that meet or exceed the highest-level list.
           # (all lists must be completely invalidated, or else remain alive).
           abort_field = exec_field #: ExecutionField[untyped]?

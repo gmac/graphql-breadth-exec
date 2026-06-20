@@ -86,24 +86,12 @@ module GraphQL::BreadthExec
 
       #: -> ExecutionScope
       def root
-        @root ||= begin
-          next_scope = Util.deep_copy(self)
-          next_scope = next_scope.parent while next_scope.parent
-          next_scope
-        end
+        @root ||= @parent ? @parent.root : self
       end
 
       #: -> ExecutionScope
       def planning_root
-        @planning_root ||= begin
-          next_scope = Util.deep_copy(self)
-          while next_scope.parent
-            return next_scope if next_scope.abstraction
-
-            next_scope = next_scope.parent
-          end
-          next_scope
-        end
+        @planning_root ||= (abstraction || @parent.nil?) ? self : @parent.planning_root
       end
 
       #: -> Integer
