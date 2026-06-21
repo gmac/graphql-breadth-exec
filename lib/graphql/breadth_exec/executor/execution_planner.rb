@@ -58,8 +58,9 @@ module GraphQL::BreadthExec
       #|   GraphQL::Language::Nodes::OperationDefinition,
       #|   root_object: untyped,
       #|   result: graphql_result,
+      #|   ?allow_subscription: bool,
       #| ) -> Array[ExecutionScope]
-      def root_scopes_for_operation(operation, root_object:, result:)
+      def root_scopes_for_operation(operation, root_object:, result:, allow_subscription: false)
         case operation.operation_type
         when QUERY_OPERATION
           [
@@ -83,9 +84,54 @@ module GraphQL::BreadthExec
               results: [result],
             )
           end
+        when SUBSCRIPTION_OPERATION
+          raise OperationTypeUnsupportedError.new(operation.operation_type) unless allow_subscription
+
+          [
+            ExecutionScope.new(
+              executor: @executor,
+              parent_type: root_type_for_operation(SUBSCRIPTION_OPERATION),
+              selections: operation.selections,
+              objects: [root_object],
+              results: [result],
+            ),
+          ]
         else
           raise OperationTypeUnsupportedError.new(operation.operation_type)
         end
+      end
+
+      #: (
+      #|   GraphQL::Language::Nodes::OperationDefinition,
+      #|   root_object: untyped,
+      #|   result: graphql_result,
+      #| ) -> ExecutionField[untyped]
+      def subscription_source_field_for_operation(operation, root_object:, result:)
+        subscription_type = root_type_for_operation(SUBSCRIPTION_OPERATION)
+        unless subscription_type
+          raise ExecutionError.new("Schema is not configured to execute subscription operation", path: [SUBSCRIPTION_OPERATION])
+        end
+
+        exec_scope = ExecutionScope.new(
+          executor: @executor,
+          parent_type: subscription_type,
+          selections: operation.selections,
+          objects: [root_object],
+          results: [result],
+        )
+
+        @has_runtime_directives = false
+        selections_by_key = selections_grouped_by_key(subscription_type, operation.selections)
+        has_runtime_directives = @has_runtime_directives
+        key, nodes = selections_by_key.first
+
+        unless key && nodes
+          raise ExecutionError.new("Subscription operation must select a source field", path: [SUBSCRIPTION_OPERATION])
+        end
+
+        exec_field = build_execution_field(key, nodes, exec_scope, has_runtime_directives)
+        exec_scope.fields = { key => exec_field }.freeze
+        exec_field
       end
 
       #: (Array[ExecutionScope]) -> Array[ExecutionScope]
@@ -221,6 +267,13 @@ module GraphQL::BreadthExec
         node_name = first_node.name
 
         definition = @context.types.field(exec_scope.parent_type, node_name)
+        unless definition
+          raise ExecutionError.new(
+            "No field named '#{node_name}' on '#{exec_scope.parent_type.graphql_name}'",
+            nodes: [first_node],
+          )
+        end
+
         resolver = if definition.is_a?(HasBreadthResolver::Field) && definition.breadth_resolver
           definition.breadth_resolver
         elsif definition.introspection?

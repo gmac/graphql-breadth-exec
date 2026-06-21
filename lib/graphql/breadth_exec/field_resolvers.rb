@@ -20,6 +20,11 @@ module GraphQL
         resolve(exec_field, ctx)
       end
 
+      #: (Executor::ExecutionField[untyped], ContextType) -> untyped
+      def subscribe(exec_field, ctx)
+        resolve_field(exec_field, ctx)
+      end
+
       #: (Array[untyped] | ExecutionPromise) { (Array[untyped]) -> Array[untyped] } -> (Array[untyped] | ExecutionPromise)
       def handle_resolved(result)
         if result.is_a?(ExecutionPromise)
