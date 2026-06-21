@@ -11,13 +11,8 @@ module GraphQL
       end
 
       #: (Executor::ExecutionField[untyped], ContextType) -> (Array[untyped] | ExecutionPromise)
-      def resolve(*)
-        raise NotImplementedError, "Resolver#resolve must be implemented."
-      end
-
-      #: (Executor::ExecutionField[untyped], ContextType) -> (Array[untyped] | ExecutionPromise)
-      def resolve_field(exec_field, ctx)
-        resolve(exec_field, ctx)
+      def resolve(exec_field, ctx)
+        raise NotImplementedError, "FieldResolver#resolve must be implemented."
       end
 
       #: (Array[untyped] | ExecutionPromise) { (Array[untyped]) -> Array[untyped] } -> (Array[untyped] | ExecutionPromise)
@@ -27,6 +22,11 @@ module GraphQL
         else
           yield(result)
         end
+      end
+
+      #: (Executor::ExecutionField[untyped], ContextType) -> Enumerable
+      def subscribe(_exec_field, _ctx)
+        raise NotImplementedError, "FieldResolver#subscribe must be implemented."
       end
     end
 

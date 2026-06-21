@@ -35,7 +35,7 @@ module GraphQL::BreadthExec
       attr_reader :parent
 
       #: Hash[String, ExecutionField[untyped]]
-      attr_accessor :fields
+      attr_reader :fields
 
       #: bool
       attr_writer :executed
@@ -72,7 +72,7 @@ module GraphQL::BreadthExec
         @abstraction = abstraction
         @path = (parent_field ? parent_field.path : path).freeze
         @parent = parent_field ? parent_field.scope : parent
-        @fields = nil
+        @fields = {}
         @executed = false
         @root = nil
         @planning_root = nil

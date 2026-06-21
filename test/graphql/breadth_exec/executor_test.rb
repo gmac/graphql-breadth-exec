@@ -60,21 +60,6 @@ class GraphQL::BreadthExec::ExecutorTest < Minitest::Test
     assert_equal expected, breadth_exec(document, source).dig("data")
   end
 
-  def test_subscriptions_not_supported
-    document = %|subscription {
-      onWriteValue { value }
-    }|
-
-    expected = {
-      "errors" => [{
-        "message" => "Unsupported operation type",
-        "path" => ["subscription"],
-      }],
-    }
-
-    assert_equal expected, breadth_exec(document, {})
-  end
-
   def test_raises_not_implemented_for_missing_resolvers
     document = %|{ noResolver }|
 

@@ -83,8 +83,16 @@ module GraphQL::BreadthExec
               results: [result],
             )
           end
-        else
-          raise OperationTypeUnsupportedError.new(operation.operation_type)
+        when SUBSCRIPTION_OPERATION
+          [
+            ExecutionScope.new(
+              executor: @executor,
+              parent_type: root_type_for_operation(SUBSCRIPTION_OPERATION),
+              selections: operation.selections,
+              objects: [root_object],
+              results: [result],
+            ),
+          ]
         end
       end
 
@@ -176,7 +184,6 @@ module GraphQL::BreadthExec
       #|   ?ordered_fields: Array[ExecutionField[untyped]],
       #| ) -> Array[ExecutionField[untyped]]
       def build_execution_tree(exec_scope, ordered_fields = [])
-        exec_scope.fields ||= {}
         @has_runtime_directives = false
         selections_by_key = selections_grouped_by_key(exec_scope.parent_type, exec_scope.selections)
         has_runtime_directives = @has_runtime_directives

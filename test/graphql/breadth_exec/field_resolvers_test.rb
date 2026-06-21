@@ -130,6 +130,6 @@ class GraphQL::BreadthExec::FieldResolversTest < Minitest::Test
       GraphQL.parse(document_string),
       resolvers: resolvers,
       root_object: root_object,
-    ).perform
+    ).result
   end
 end

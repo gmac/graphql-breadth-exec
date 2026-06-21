@@ -79,7 +79,7 @@ class GraphQL::BreadthExec::Executor::AuthorizationTest < Minitest::Test
       resolvers: AUTH_RESOLVERS,
       root_object: SOURCE,
       authorization: RecordingAuthorization,
-    ).perform
+    ).result
   end
 
   def test_checks_field_authorization_before_resolving_field

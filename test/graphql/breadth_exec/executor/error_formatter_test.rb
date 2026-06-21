@@ -199,7 +199,7 @@ class GraphQL::BreadthExec::Executor::ErrorFormatterTest < Minitest::Test
       root_object: source,
     )
 
-    result = executor.perform
+    result = executor.result
     yield executor if block_given?
     result
   end

@@ -134,7 +134,7 @@ class GraphQL::BreadthExec::Executor::ErrorsTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(BUILD_ERROR_SCHEMA, document, resolvers: BUILD_ERROR_RESOLVERS, root_object: source)
-    assert_equal expected, executor.perform
+    assert_equal expected, executor.result
   end
 
   def test_nullable_scalar_result_coerced_to_nil_builds_missing_value_without_error
@@ -254,6 +254,6 @@ class GraphQL::BreadthExec::Executor::ErrorsTest < Minitest::Test
       ResultCoercionSchema,
       GraphQL.parse(document),
       root_object: source,
-    ).perform
+    ).result
   end
 end

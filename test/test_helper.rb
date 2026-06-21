@@ -28,7 +28,7 @@ def breadth_exec(query, source, variables: {}, context: {}, tracers: [GraphQL::B
     tracers: tracers,
     variables: variables,
     context: context,
-  ).perform
+  ).result
 end
 
 def assert_error_reported(expected_class, &block)

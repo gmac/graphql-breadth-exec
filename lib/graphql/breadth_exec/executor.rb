@@ -66,8 +66,10 @@ module GraphQL
         @input = InputFormatter.new(@context)
         @planner = ExecutionPlanner.new(executor: self, resolvers: @resolvers)
         @authorization = authorization.new
+        @authorization_class = authorization
         @document = document
         @root_object = root_object
+        @context_value = context
         @tracers = tracers
         @result = {}
         @data = {}
@@ -98,9 +100,41 @@ module GraphQL
       end
 
       #: -> graphql_result
-      def perform
-        execute unless executed?
-        @result
+      def result
+        operation = @query.selected_operation
+        if operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
+          raise ImplementationError, "Use result_or_subscribe for subscription operations"
+        end
+
+        return @result if executed?
+
+        execute
+      end
+
+      #: -> (SubscriptionResponseStream | graphql_result)
+      def result_or_subscribe
+        return @result if executed?
+
+        operation = @query.selected_operation
+        @result = if operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
+          subscribe(operation)
+        else
+          execute
+        end
+      end
+
+      #: (untyped) -> graphql_result
+      def execute_subscription_event(object)
+        self.class.new(
+          @schema,
+          @document,
+          resolvers: @resolvers,
+          root_object: object,
+          variables: @provided_variables,
+          context: @context_value,
+          tracers: @tracers,
+          authorization: @authorization_class,
+        ).execute
       end
 
       #: (singleton(LazyLoader), ?loader_args?) -> LazyLoader[untyped]
@@ -173,7 +207,7 @@ module GraphQL
         @executed
       end
 
-      private
+      protected
 
       #: -> graphql_result
       def execute
@@ -211,11 +245,7 @@ module GraphQL
               @tracers.each { _1.before_execute(self, @context) }
             end
 
-            root_scopes = begin
-              @planner.root_scopes_for_operation(operation, root_object: @root_object, result: @data)
-            rescue OperationTypeUnsupportedError => op_err
-              return build_result(errors: [op_err.to_h])
-            end
+            root_scopes = @planner.root_scopes_for_operation(operation, root_object: @root_object, result: @data)
 
             @planner.plan_scopes(root_scopes).each do |exec_scope|
               @exec_queue << exec_scope
@@ -273,6 +303,8 @@ module GraphQL
           @tracers.each { _1.finish(self, @context, duration:) }
         end
       end
+
+      private
 
       #: (
       #|   Array[ExecutionDirective],
@@ -528,10 +560,10 @@ module GraphQL
           if !pre_authorized
             exec_field.result = exec_field.resolve_all(FieldAuthorizationError.new(exec_field: exec_field))
           elsif exec_field.directives.empty?
-            exec_field.result = exec_field.resolver.resolve_field(exec_field, @context)
+            exec_field.result = exec_field.resolver.resolve(exec_field, @context)
           else
             execute_with_directives(exec_field.directives, current_field: exec_field) do
-              exec_field.result = exec_field.resolver.resolve_field(exec_field, @context)
+              exec_field.result = exec_field.resolver.resolve(exec_field, @context)
             end
           end
         rescue StandardError => e
@@ -831,6 +863,52 @@ module GraphQL
         @exec_queue.concat(@planner.plan_scopes(scopes))
       end
 
+      #: (GraphQL::Language::Nodes::OperationDefinition) -> (SubscriptionResponseStream | graphql_result)
+      def subscribe(operation)
+        @executed = true
+
+        unless @context.errors.empty?
+          return build_result(errors: @context.errors.map(&:to_h))
+        end
+
+        begin
+          @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
+        rescue InputValidationErrorSet => input_error
+          return build_result(errors: serialize_errors(input_error))
+        end
+
+        execute_with_directives(@planner.root_directives_for_operation(operation)) do
+          root_scopes = @planner.root_scopes_for_operation(operation, root_object: @root_object, result: @data)
+          exec_scope = @planner.plan_scopes(root_scopes).fetch(0)
+          exec_field = exec_scope.fields.each_value.first #: as !nil
+
+          exec_field.validate!
+          exec_field.lazy_state_executing!
+
+          pre_authorized = @authorization.authorized_field?(exec_field, @context)
+          pre_authorized &&= @authorization.authorized_type?(exec_field.type.unwrap, @context, exec_field: exec_field)
+          raise FieldAuthorizationError.new(exec_field: exec_field) unless pre_authorized
+
+          source_stream = if exec_field.directives.empty?
+            exec_field.resolver.subscribe(exec_field, @context)
+          else
+            execute_with_directives(exec_field.directives, current_field: exec_field) do
+              exec_field.resolver.subscribe(exec_field, @context)
+            end
+          end
+
+          unless source_stream.is_a?(Enumerable)
+            raise ImplementationError, "Subscription source must return an Enumerable"
+          end
+
+          exec_field.lazy_state_locked!
+          SubscriptionResponseStream.new(executor: self, source_stream: source_stream)
+        rescue StandardError => e
+          handled_error = handle_or_reraise(e, exec_field: exec_field)
+          build_result(errors: serialize_errors(handled_error, exec_field: exec_field))
+        end
+      end
+
       #: (?data: Util::NilLike | graphql_result | nil, ?errors: Array[error_hash]) -> graphql_result
       def build_result(data: UNDEFINED, errors: EMPTY_ARRAY)
         # Truncate errors but preserve GraphQL-Ruby's validation error limit message when present.
@@ -860,6 +938,20 @@ module GraphQL
         end
 
         @result
+      end
+
+      #: (ExecutionError, ?exec_field: ExecutionField[untyped]?) -> Array[error_hash]
+      def serialize_errors(error, exec_field: nil)
+        errors = [] #: Array[error_hash]
+        error.each do |err|
+          next if err.equal?(UNREPORTED_ERROR)
+
+          hash = err.to_h
+          hash["path"] ||= exec_field.path if exec_field
+          errors << hash
+        end
+
+        errors
       end
 
       #: (?Float?) -> Float

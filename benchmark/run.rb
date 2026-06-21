@@ -363,7 +363,7 @@ class GraphQLBenchmark
               resolvers: BREADTH_RESOLVERS,
               root_object: data_source,
               tracers: [CARDINAL_TRACER],
-            ).perform
+            ).result
           end
 
           x.compare!
@@ -396,7 +396,7 @@ class GraphQLBenchmark
               resolvers: BREADTH_DEFERRED_RESOLVERS,
               root_object: data_source,
               tracers: [CARDINAL_TRACER],
-            ).perform
+            ).result
           end
 
           x.compare!
@@ -419,7 +419,7 @@ class GraphQLBenchmark
             resolvers: BREADTH_RESOLVERS,
             root_object: {},
             tracers: [CARDINAL_TRACER],
-          ).perform
+          ).result
         end
 
         x.compare!
@@ -451,7 +451,7 @@ class GraphQLBenchmark
             resolvers: RESOLVE_BATCH_RESOLVERS,
             root_object: RESOLVE_BATCH_DATA,
             tracers: [CARDINAL_TRACER],
-          ).perform
+          ).result
         end
 
         x.compare!
@@ -471,7 +471,7 @@ class GraphQLBenchmark
             resolvers: LAZY_SCALAR_BREADTH_RESOLVERS,
             root_object: RESOLVE_BATCH_DATA,
             tracers: [CARDINAL_TRACER],
-          ).perform
+          ).result
         end
 
         x.report("graphql-ruby graphql-batch: #{RESOLVE_BATCH_OBJECT_COUNT} x 3 scalars") do
@@ -523,7 +523,7 @@ class GraphQLBenchmark
             resolvers: LAZY_SCALAR_BREADTH_RESOLVERS,
             root_object: RESOLVE_BATCH_DATA,
             tracers: [CARDINAL_TRACER],
-          ).perform
+          ).result
         end
 
         x.compare!
@@ -552,7 +552,7 @@ class GraphQLBenchmark
             resolvers: BREADTH_RESOLVERS,
             root_object: data_source,
             tracers: [CARDINAL_TRACER],
-          ).perform
+          ).result
         end
 
         puts "\n\ngraphql-cardinal memory profile: #{num_objects} resolvers"
