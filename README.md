@@ -8,7 +8,7 @@ The execution algorithm is proven at scale in production. This implementation st
 
 * Uses GraphQL Ruby schemas.
 * Currently no built-in validation or analysis, do it ahead of time.
-* No support for subscription, defer, or stream.
+* Currently no defer or stream.
 * Supports input validations, but NOT input transformations (ie: "prepare" hooks).
 
 # Usage
@@ -16,11 +16,10 @@ The execution algorithm is proven at scale in production. This implementation st
 ## Execute a query
 
 ```ruby
-executor = GraphQL::BreadthExec::Executor.build(
-  schema: MyGraphQLSchema,
-  document: GraphQL.parse(document),
+executor = GraphQL::BreadthExec::Executor.new(
+  MyGraphQLSchema,
+  GraphQL.parse(document),
   root_object: { ... },
-  operation_name: "OperationName",
   variables: { ... },
   context: { ... },
   tracers: [ ... ],
@@ -539,7 +538,9 @@ class MyAuthorization < GraphQL::BreadthExec::Authorization
   # ... detail auth behaviors
 end
 
-GraphQL::BreadthExec::Executor.build(
+GraphQL::BreadthExec::Executor.new(
+  MyGraphQLSchema,
+  GraphQL.parse(document),
   authorization: MyAuthorization,
 )
 ```
@@ -654,3 +655,83 @@ end
 ```
 
 This architecture makes cascading resolvers run repeatedly on every field in a subtree, rather than just once at the top of the owning field's subtree. This pattern is more granular and generally safer for isolation and parallelism, though has more resolver churn than a typical depth traversal so should be used accordingly.
+
+## Subscriptions
+
+Query and mutation execution use `result`, which always returns a normal GraphQL result hash. If a controller accepts subscription operations, use `result_or_subscribe` instead. For query and mutation operations it returns the same result hash as `result`; for subscription operations it returns a `GraphQL::BreadthExec::SubscriptionResponseStream` on successful source setup, or a normal GraphQL result hash for public setup errors. Calling `result` for a subscription operation raises an implementation error.
+
+```ruby
+executor = GraphQL::BreadthExec::Executor.new(
+  MyGraphQLSchema,
+  GraphQL.parse(document),
+  variables: { ... },
+  context: { ... },
+)
+
+response = executor.result_or_subscribe
+
+if response.is_a?(GraphQL::BreadthExec::SubscriptionResponseStream)
+  response.each do |event_result|
+    deliver(event_result)
+  end
+else
+  deliver(response)
+end
+```
+
+Subscription root fields use two field resolver hooks:
+
+* `subscribe(exec_field, context)` runs once during subscription setup and must return an `Enumerable` or `Enumerator` of source events.
+* `resolve(exec_field, context)` runs once per yielded source event. The source event is used as the root object for that event's GraphQL execution.
+
+```ruby
+class OnWriteValueResolver < GraphQL::BreadthExec::FieldResolver
+  def subscribe(exec_field, context)
+    context[:write_value_events]
+  end
+
+  def resolve(exec_field, context)
+    exec_field.map_objects(&:itself)
+  end
+end
+
+class WriteValuePayload < BaseObject
+  field :value, String, null: true
+end
+
+class Subscription < BaseObject
+  field :on_write_value, WriteValuePayload, null: true do |field|
+    field.breadth_resolver = OnWriteValueResolver.new
+  end
+end
+```
+
+For a small in-process source stream, any Ruby enumerator is enough:
+
+```ruby
+write_value_events = Enumerator.new do |events|
+  events << { value: "first" }
+  events << { value: "second" }
+end
+
+executor = GraphQL::BreadthExec::Executor.new(
+  MyGraphQLSchema,
+  GraphQL.parse(%|
+    subscription WatchWrites {
+      onWriteValue {
+        value
+      }
+    }
+  |),
+  context: { write_value_events: write_value_events },
+)
+
+stream = executor.result_or_subscribe
+stream.each do |event_result|
+  # {"data"=>{"onWriteValue"=>{"value"=>"first"}}}
+  # {"data"=>{"onWriteValue"=>{"value"=>"second"}}}
+  deliver(event_result)
+end
+```
+
+Each source event is fulfilled through normal breadth execution, so field resolvers, lazy loading, authorization, directives, abstract type resolution, and error formatting all work as they do for query execution. Errors raised while enumerating the source stream are allowed to propagate to the stream consumer. Promise-backed subscription setup is not supported; `subscribe` should return the source stream synchronously. Returning a promise or any non-enumerable value is an implementation error.

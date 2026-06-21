@@ -153,7 +153,7 @@ class GraphQL::BreadthExec::Executor::LoadersTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(LOADER_SCHEMA, document, resolvers: LOADER_RESOLVERS, root_object: source)
-    assert_equal expected, executor.perform
+    assert_equal expected, executor.result
     assert_equal [["Apple", "Banana"], ["Coconut"]], FancyLoader.perform_keys
   end
 
@@ -187,7 +187,7 @@ class GraphQL::BreadthExec::Executor::LoadersTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(LOADER_SCHEMA, document, resolvers: LOADER_RESOLVERS, root_object: source)
-    result = executor.perform
+    result = executor.result
     assert_equal expected, result
     assert_equal result.dig("data", "widget").keys, expected.dig("data", "widget").keys
   end
@@ -222,7 +222,7 @@ class GraphQL::BreadthExec::Executor::LoadersTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(LOADER_SCHEMA, document, resolvers: LOADER_RESOLVERS, root_object: source)
-    result = executor.perform
+    result = executor.result
     assert_equal expected, result
     assert_equal result.dig("data", "widget").keys, expected.dig("data", "widget").keys
   end
@@ -256,7 +256,7 @@ class GraphQL::BreadthExec::Executor::LoadersTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
-    assert_equal expected, executor.perform
+    assert_equal expected, executor.result
     assert_equal [["Banana"]], FancyLoader.perform_keys
   end
 
@@ -286,7 +286,7 @@ class GraphQL::BreadthExec::Executor::LoadersTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
-    assert_equal expected, executor.perform
+    assert_equal expected, executor.result
     assert_equal [["Apple"]], FancyLoader.perform_keys
   end
 
@@ -319,7 +319,7 @@ class GraphQL::BreadthExec::Executor::LoadersTest < Minitest::Test
     }
 
     executor = GraphQL::BreadthExec::Executor.new(LOADER_SCHEMA, document, resolvers: resolvers, root_object: source)
-    assert_equal expected, executor.perform
+    assert_equal expected, executor.result
     assert_equal [["Apple"], ["Banana"]], FancyLoader.perform_keys
   end
 end

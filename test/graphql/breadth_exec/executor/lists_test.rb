@@ -202,6 +202,6 @@ class GraphQL::BreadthExec::Executor::ListsTest < Minitest::Test
   private
 
   def execute_query(document, source, schema: TEST_SCHEMA, resolvers: TEST_RESOLVERS)
-    GraphQL::BreadthExec::Executor.new(schema, GraphQL.parse(document), resolvers: resolvers, root_object: source).perform
+    GraphQL::BreadthExec::Executor.new(schema, GraphQL.parse(document), resolvers: resolvers, root_object: source).result
   end
 end

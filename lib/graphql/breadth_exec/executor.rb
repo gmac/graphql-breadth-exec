@@ -81,7 +81,6 @@ module GraphQL
         @loader_cache = nil
         @paths = nil
         @executed = false
-        @subscribed = false
         @aborted = false
       end
 
@@ -101,96 +100,41 @@ module GraphQL
       end
 
       #: -> graphql_result
-      def perform
-        raise ImplementationError, "Cannot perform after subscribe" if subscribed?
+      def result
+        operation = @query.selected_operation
+        if operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
+          raise ImplementationError, "Use result_or_subscribe for subscription operations"
+        end
 
-        execute unless executed?
-        @result
+        return @result if executed?
+
+        execute
       end
 
       #: -> (SubscriptionResponseStream | graphql_result)
-      def subscribe
-        raise ImplementationError, "Cannot subscribe after perform" if executed?
-        raise ImplementationError, "Cannot subscribe more than once" if subscribed?
+      def result_or_subscribe
+        return @result if executed?
 
-        @subscribed = true
-        source_stream = create_source_event_stream
-        return source_stream if source_stream.is_a?(Hash)
-
-        map_source_to_response_event(source_stream)
-      end
-
-      #: -> (Enumerable | graphql_result)
-      def create_source_event_stream
         operation = @query.selected_operation
-
-        unless @context.errors.empty?
-          return build_result(errors: @context.errors.map(&:to_h))
+        @result = if operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
+          subscribe(operation)
+        else
+          execute
         end
-
-        unless operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
-          return build_result(errors: [
-            ExecutionError.new("Expected subscription operation", path: [operation.operation_type]).to_h,
-          ])
-        end
-
-        begin
-          @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
-        rescue InputValidationErrorSet => e
-          return build_setup_error_result(e)
-        end
-
-        begin
-          setup_result = execute_with_directives(@planner.root_directives_for_operation(operation)) do
-            build_subscription_source_stream(operation)
-          end
-
-          unless setup_result.is_a?(Array)
-            return build_setup_error_result(ExecutionError.new("Subscription source must return an Enumerable"))
-          end
-
-          exec_field = setup_result[0]
-          source_stream = setup_result[1]
-
-          if source_stream.is_a?(ExecutionPromise)
-            return build_setup_error_result(
-              ExecutionError.new("Subscription source setup does not support lazy promises", exec_field: exec_field),
-              exec_field: exec_field,
-            )
-          end
-
-          unless source_stream.is_a?(Enumerable)
-            return build_setup_error_result(
-              ExecutionError.new("Subscription source must return an Enumerable", exec_field: exec_field),
-              exec_field: exec_field,
-            )
-          end
-
-          source_stream
-        rescue StandardError => e
-          exec_field = e.is_a?(ExecutionError) ? e.exec_field : nil
-          build_setup_error_result(handle_or_reraise(e, exec_field: exec_field), exec_field: exec_field)
-        end
-      end
-
-      #: (Enumerable) -> SubscriptionResponseStream
-      def map_source_to_response_event(source_stream)
-        SubscriptionResponseStream.new(executor: self, source_stream: source_stream)
       end
 
       #: (untyped) -> graphql_result
-      def execute_subscription_event(root_object)
-        event_executor = self.class.new(
+      def execute_subscription_event(object)
+        self.class.new(
           @schema,
           @document,
           resolvers: @resolvers,
-          root_object: root_object,
+          root_object: object,
           variables: @provided_variables,
           context: @context_value,
           tracers: @tracers,
           authorization: @authorization_class,
-        )
-        event_executor.__send__(:execute, allow_subscription: true)
+        ).execute
       end
 
       #: (singleton(LazyLoader), ?loader_args?) -> LazyLoader[untyped]
@@ -263,58 +207,10 @@ module GraphQL
         @executed
       end
 
-      #: -> bool
-      def subscribed?
-        @subscribed
-      end
+      protected
 
-      private
-
-      #: (ExecutionError, ?exec_field: ExecutionField[untyped]?) -> graphql_result
-      def build_setup_error_result(error, exec_field: nil)
-        errors = [] #: Array[error_hash]
-        error.each do |err|
-          next if err.equal?(UNREPORTED_ERROR)
-
-          hash = err.to_h
-          hash["path"] ||= exec_field.path if exec_field
-          errors << hash
-        end
-
-        build_result(errors: errors)
-      end
-
-      #: (GraphQL::Language::Nodes::OperationDefinition) -> [ExecutionField[untyped], untyped]
-      def build_subscription_source_stream(operation)
-        exec_field = @planner.subscription_source_field_for_operation(operation, root_object: @root_object, result: @data)
-
-        begin
-          exec_field.validate!
-          exec_field.lazy_state_executing!
-
-          pre_authorized = @authorization.authorized_field?(exec_field, @context)
-          pre_authorized &&= @authorization.authorized_type?(exec_field.type.unwrap, @context, exec_field: exec_field)
-          raise FieldAuthorizationError.new(exec_field: exec_field) unless pre_authorized
-
-          source_stream = if exec_field.directives.empty?
-            exec_field.resolver.subscribe(exec_field, @context)
-          else
-            execute_with_directives(exec_field.directives, current_field: exec_field) do
-              exec_field.resolver.subscribe(exec_field, @context)
-            end
-          end
-          source_stream = exec_field.result if source_stream.nil? && exec_field.has_result?
-
-          [exec_field, source_stream]
-        rescue StandardError => e
-          raise handle_or_reraise(e, exec_field: exec_field)
-        ensure
-          exec_field.lazy_state_locked!
-        end
-      end
-
-      #: (?allow_subscription: bool) -> graphql_result
-      def execute(allow_subscription: false)
+      #: -> graphql_result
+      def execute
         @executed = true
 
         # there is no result data until execution starts
@@ -349,11 +245,7 @@ module GraphQL
               @tracers.each { _1.before_execute(self, @context) }
             end
 
-            root_scopes = begin
-              @planner.root_scopes_for_operation(operation, root_object: @root_object, result: @data, allow_subscription: allow_subscription)
-            rescue OperationTypeUnsupportedError => op_err
-              return build_result(errors: [op_err.to_h])
-            end
+            root_scopes = @planner.root_scopes_for_operation(operation, root_object: @root_object, result: @data)
 
             @planner.plan_scopes(root_scopes).each do |exec_scope|
               @exec_queue << exec_scope
@@ -411,6 +303,8 @@ module GraphQL
           @tracers.each { _1.finish(self, @context, duration:) }
         end
       end
+
+      private
 
       #: (
       #|   Array[ExecutionDirective],
@@ -666,10 +560,10 @@ module GraphQL
           if !pre_authorized
             exec_field.result = exec_field.resolve_all(FieldAuthorizationError.new(exec_field: exec_field))
           elsif exec_field.directives.empty?
-            exec_field.result = exec_field.resolver.resolve_field(exec_field, @context)
+            exec_field.result = exec_field.resolver.resolve(exec_field, @context)
           else
             execute_with_directives(exec_field.directives, current_field: exec_field) do
-              exec_field.result = exec_field.resolver.resolve_field(exec_field, @context)
+              exec_field.result = exec_field.resolver.resolve(exec_field, @context)
             end
           end
         rescue StandardError => e
@@ -969,6 +863,52 @@ module GraphQL
         @exec_queue.concat(@planner.plan_scopes(scopes))
       end
 
+      #: (GraphQL::Language::Nodes::OperationDefinition) -> (SubscriptionResponseStream | graphql_result)
+      def subscribe(operation)
+        @executed = true
+
+        unless @context.errors.empty?
+          return build_result(errors: @context.errors.map(&:to_h))
+        end
+
+        begin
+          @input.coerce_variable_values(operation.variables, @query.provided_variables || EMPTY_OBJECT)
+        rescue InputValidationErrorSet => input_error
+          return build_result(errors: serialize_errors(input_error))
+        end
+
+        execute_with_directives(@planner.root_directives_for_operation(operation)) do
+          root_scopes = @planner.root_scopes_for_operation(operation, root_object: @root_object, result: @data)
+          exec_scope = @planner.plan_scopes(root_scopes).fetch(0)
+          exec_field = exec_scope.fields.each_value.first #: as !nil
+
+          exec_field.validate!
+          exec_field.lazy_state_executing!
+
+          pre_authorized = @authorization.authorized_field?(exec_field, @context)
+          pre_authorized &&= @authorization.authorized_type?(exec_field.type.unwrap, @context, exec_field: exec_field)
+          raise FieldAuthorizationError.new(exec_field: exec_field) unless pre_authorized
+
+          source_stream = if exec_field.directives.empty?
+            exec_field.resolver.subscribe(exec_field, @context)
+          else
+            execute_with_directives(exec_field.directives, current_field: exec_field) do
+              exec_field.resolver.subscribe(exec_field, @context)
+            end
+          end
+
+          unless source_stream.is_a?(Enumerable)
+            raise ImplementationError, "Subscription source must return an Enumerable"
+          end
+
+          exec_field.lazy_state_locked!
+          SubscriptionResponseStream.new(executor: self, source_stream: source_stream)
+        rescue StandardError => e
+          handled_error = handle_or_reraise(e, exec_field: exec_field)
+          build_result(errors: serialize_errors(handled_error, exec_field: exec_field))
+        end
+      end
+
       #: (?data: Util::NilLike | graphql_result | nil, ?errors: Array[error_hash]) -> graphql_result
       def build_result(data: UNDEFINED, errors: EMPTY_ARRAY)
         # Truncate errors but preserve GraphQL-Ruby's validation error limit message when present.
@@ -998,6 +938,20 @@ module GraphQL
         end
 
         @result
+      end
+
+      #: (ExecutionError, ?exec_field: ExecutionField[untyped]?) -> Array[error_hash]
+      def serialize_errors(error, exec_field: nil)
+        errors = [] #: Array[error_hash]
+        error.each do |err|
+          next if err.equal?(UNREPORTED_ERROR)
+
+          hash = err.to_h
+          hash["path"] ||= exec_field.path if exec_field
+          errors << hash
+        end
+
+        errors
       end
 
       #: (?Float?) -> Float

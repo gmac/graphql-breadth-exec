@@ -74,7 +74,7 @@ class GraphQL::BreadthExec::Executor::DirectivesTest < Minitest::Test
       }
     }|)
 
-    result = GraphQL::BreadthExec::Executor.new(DIRECTIVE_SCHEMA, document, resolvers: resolvers, root_object: SOURCE).perform
+    result = GraphQL::BreadthExec::Executor.new(DIRECTIVE_SCHEMA, document, resolvers: resolvers, root_object: SOURCE).result
 
     assert_equal "Original", result.dig("data", "widget", "title")
     assert_equal [
@@ -103,7 +103,7 @@ class GraphQL::BreadthExec::Executor::DirectivesTest < Minitest::Test
       }
     }|)
 
-    result = GraphQL::BreadthExec::Executor.new(DIRECTIVE_SCHEMA, document, resolvers: resolvers, root_object: SOURCE).perform
+    result = GraphQL::BreadthExec::Executor.new(DIRECTIVE_SCHEMA, document, resolvers: resolvers, root_object: SOURCE).result
 
     assert_equal "Overridden", result.dig("data", "widget", "title")
   end
@@ -119,7 +119,7 @@ class GraphQL::BreadthExec::Executor::DirectivesTest < Minitest::Test
         GraphQL.parse(%|{ widget { title @replace } }|),
         resolvers: resolvers,
         root_object: SOURCE,
-      ).perform
+      ).result
     end
 
     assert_equal ["Argument \"value\" of required type \"String!\" was not provided."], reported.errors.map(&:message)
@@ -151,7 +151,7 @@ class GraphQL::BreadthExec::Executor::DirectivesTest < Minitest::Test
       }
     }|)
 
-    result = GraphQL::BreadthExec::Executor.new(DIRECTIVE_SCHEMA, document, resolvers: resolvers, root_object: SOURCE).perform
+    result = GraphQL::BreadthExec::Executor.new(DIRECTIVE_SCHEMA, document, resolvers: resolvers, root_object: SOURCE).result
 
     assert_equal "Original", result.dig("data", "widget", "title")
     assert_equal "Nested", result.dig("data", "widget", "nested", "title")

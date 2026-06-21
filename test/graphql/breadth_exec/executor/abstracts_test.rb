@@ -105,7 +105,7 @@ class GraphQL::BreadthExec::Executor::AbstractsTest < Minitest::Test
       root_object: { "node" => { "id" => "Product/1" } },
     )
 
-    assert_raises(GraphQL::BreadthExec::ImplementationError) { executor.perform }
+    assert_raises(GraphQL::BreadthExec::ImplementationError) { executor.result }
 
     error, context = TypeErrorSchema.type_errors.first
     assert_kind_of GraphQL::UnresolvedTypeError, error

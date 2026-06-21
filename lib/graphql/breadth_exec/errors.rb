@@ -179,21 +179,6 @@ module GraphQL
       end
     end
 
-    class OperationTypeUnsupportedError < ExecutionError
-      #: (String) -> void
-      def initialize(operation_type)
-        @operation_type = operation_type
-        super("Unsupported operation type")
-      end
-
-      #: () -> error_hash
-      def to_h
-        super.tap do |hash|
-          hash["path"] = [@operation_type]
-        end
-      end
-    end
-
     class InputError < ExecutionError
       #: (
       #|   String message,

@@ -158,7 +158,7 @@ class GraphQL::BreadthExec::Executor::TracersTest < Minitest::Test
         resolvers: resolvers,
         root_object: @source,
         tracers: [@tracer],
-      ).perform
+      ).result
     end
 
     assert_equal 1, @tracer.on_exception_calls.size

@@ -155,6 +155,6 @@ class GraphQL::BreadthExec::HasBreadthResolverTest < Minitest::Test
       GraphQL.parse(document),
       resolvers: resolvers,
       root_object: source,
-    ).perform
+    ).result
   end
 end

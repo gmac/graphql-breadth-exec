@@ -181,5 +181,5 @@ def execute_star_wars(query, variables: {})
     GraphQL.parse(query),
     resolvers: STAR_WARS_RESOLVERS,
     variables: variables,
-  ).perform
+  ).result
 end
