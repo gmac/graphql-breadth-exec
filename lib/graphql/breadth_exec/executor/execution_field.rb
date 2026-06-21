@@ -1,78 +1,246 @@
+# typed: true
 # frozen_string_literal: true
 
 module GraphQL::BreadthExec
   class Executor
     class ExecutionField
-      attr_reader :key, :node
-      attr_accessor :scope, :type, :result
+      include LazyElement
+      include HasAttributes
 
-      def initialize(key, scope = nil)
+      LAZY_STATE_EXECUTING = :executing
+
+      # Field's name as it appears in the response.
+      #: String
+      attr_reader :key
+
+      # Field's name according to schema.
+      #: String
+      attr_reader :name
+
+      #: GraphQL::Schema::Field?
+      attr_reader :definition
+
+      #: Array[ExecutionDirective]
+      attr_reader :directives
+
+      #: FieldResolver[untyped]
+      attr_reader :resolver
+
+      #: Array[GraphQL::Language::Nodes::Field]
+      attr_reader :nodes
+
+      #: graphql_arguments
+      attr_reader :arguments
+
+      #: ExecutionScope
+      attr_accessor :scope
+
+      #: singleton(GraphQL::Schema::Member)
+      attr_accessor :type
+
+      #: untyped
+      attr_accessor :result
+
+      #: (
+      #|   String,
+      #|   nodes: Array[GraphQL::Language::Nodes::Field],
+      #|   scope: ExecutionScope,
+      #|   definition: GraphQL::Schema::Field,
+      #|   resolver: FieldResolver[untyped],
+      #|   ?directives: Array[ExecutionDirective],
+      #| ) -> void
+      def initialize(key, nodes:, scope:, definition:, resolver:, directives: EMPTY_ARRAY)
+        super()
         @key = key.freeze
         @scope = scope
-        @name = nil
-        @node = nil
-        @nodes = nil
-        @type = nil
+        @definition = definition
+        @directives = directives.freeze
+        @resolver = resolver
+        @name = definition.graphql_name.freeze
+        @nodes = nodes.freeze
+        @type = definition.type
         @result = nil
-        @arguments = nil
+        @arguments, @argument_errors = executor.input.coerce_argument_values(@definition, @nodes.first)
+        @mutable_arguments = nil
         @path = nil
+        @schema_path = nil
       end
 
-      def name
-        @name ||= @node.name.freeze
+      #: () -> Array[ObjectType]
+      def objects
+        @scope.objects
       end
 
+      #: () -> GraphQL::Query::Context
+      def context
+        @scope.context
+      end
+
+      #: () -> singleton(GraphQL::Schema::Member)
+      def parent_type
+        @scope.parent_type
+      end
+
+      #: () -> Executor
+      def executor
+        @scope.executor
+      end
+
+      #: () -> ExecutionScope
+      def root
+        @scope.root
+      end
+
+      #: () -> ExecutionScope
+      def planning_root
+        @scope.planning_root
+      end
+
+      #: -> Integer
+      def depth
+        path.length
+      end
+
+      #: () -> Array[String]
+      def schema_path
+        @schema_path ||= [*@scope.schema_path, name].freeze
+      end
+
+      #: (
+      #|   loader_class: singleton(LazyLoader),
+      #|   keys: Array[untyped],
+      #|   ?args: loader_args?,
+      #|   ?eager_values: Hash[untyped, untyped]?,
+      #|   ?load_nil_keys: bool,
+      #| ) -> ExecutionPromise
+      def lazy(loader_class:, keys:, args: nil, eager_values: nil, load_nil_keys: false)
+        unless allows_lazy?
+          raise LazySequencingError.new(lazy_element: self, method_name: "lazy")
+        end
+
+        executor.lazy_loader_for(loader_class, args).load(
+          element: self,
+          keys: keys,
+          eager_values: eager_values,
+          load_nil_keys: load_nil_keys,
+        )
+      end
+
+      #: (Array[ExecutionPromise]) -> ExecutionPromise
+      def await_all(promises)
+        super
+      end
+
+      #: () -> bool
+      def allows_lazy?
+        @lazy_state == LAZY_STATE_EXECUTING
+      end
+
+      #: () -> Array[String]
       def path
         @path ||= (@scope ? [*@scope.path, @key] : []).freeze
       end
 
-      def add_node(n)
-        if !@node
-          @node = n
-        elsif !@nodes
-          @nodes = [@node, n]
-        else
-          @nodes << n
+      #: (Integer) -> error_path
+      def object_path(index)
+        path = @scope.object_path(index)
+        path << @key
+        path
+      end
+
+      #: [T] () { (untyped) -> (T | ExecutionError) } -> Array[T | ExecutionError]
+      def map_objects(&block)
+        objects.map do |obj|
+          yield(obj)
+        rescue StandardError => e
+          handle_or_reraise(e)
         end
       end
 
-      def nodes
-        @nodes ? @nodes : [@node]
+      #: [T] () { (untyped, Integer) -> (T | ExecutionError) } -> Array[T | ExecutionError]
+      def map_objects_with_index(&block)
+        objects.map.with_index do |obj, index|
+          yield(obj, index)
+        rescue StandardError => e
+          handle_or_reraise(e)
+        end
       end
 
+      #: [T] (T) -> Array[T]
+      def resolve_all(value)
+        value = handle_or_reraise(value) if value.is_a?(StandardError)
+        Array.new(objects.length, value)
+      end
+
+      #: (Exception) -> ExecutionError
+      def handle_or_reraise(error)
+        executor.handle_or_reraise(error, exec_field: self)
+      end
+
+      #: () -> Array[selection_node]
       def selections
-        if @nodes
+        if @nodes.length > 1
           @nodes.flat_map(&:selections)
         else
-          @node.selections
+          @nodes.first.selections
         end
       end
 
-      def arguments(vars)
-        return EMPTY_OBJECT if @node.arguments.empty?
+      #: () -> graphql_arguments
+      def mutable_arguments
+        @mutable_arguments ||= Util.deep_copy(arguments)
+      end
 
-        @arguments ||= @node.arguments.each_with_object({}) do |arg, args|
-          args[arg.name] = build_arguments(arg.value, vars)
+      #: () -> void
+      def validate!
+        unless @argument_errors.empty?
+          node = @nodes.first
+          @argument_errors.each { _1.add_parent_node(node) }
+          raise ExecutionErrorSet.new(exec_field: self, errors: @argument_errors)
         end
+      end
+
+      #: () -> bool
+      def lazy_result?
+        @result.is_a?(ExecutionPromise)
+      end
+
+      #: () -> bool
+      def has_result?
+        !@result.nil?
+      end
+
+      #: () -> bool
+      def propagates_null?
+        current_type = @type
+        return false unless current_type.kind.wraps?
+
+        while current_type.list?
+          return false unless current_type.non_null?
+
+          current_type = Util.unwrap_non_null(current_type).of_type
+        end
+
+        current_type.non_null?
+      end
+
+      #: () -> String
+      def inspect
+        alias_prefix = key == name ? "" : "#{key} => "
+        "#<ExecutionField: #{alias_prefix}#{scope.parent_type.graphql_name}.#{name}>"
+      end
+
+      def lazy_state_executing!
+        raise LazyStateTransitionError.new(@lazy_state, LAZY_STATE_EXECUTING) unless @lazy_state == LAZY_STATE_PRELOADING
+
+        @lazy_state = LAZY_STATE_EXECUTING
       end
 
       private
 
-      def build_arguments(value, vars)
-        case value
-        when GraphQL::Language::Nodes::VariableIdentifier
-          vars[value.name] || vars[value.name.to_sym]
-        when GraphQL::Language::Nodes::NullValue
-          nil
-        when GraphQL::Language::Nodes::InputObject
-          value.arguments.each_with_object({}) do |arg, obj|
-            obj[arg.name] = build_arguments(arg.value, vars)
-          end
-        when Array
-          value.map { |item| build_arguments(item, vars) }
-        else
-          value
-        end
+      #: () -> bool
+      def lazy_state_lockable?
+        @lazy_state == LAZY_STATE_PRELOADING || @lazy_state == LAZY_STATE_EXECUTING
       end
     end
   end

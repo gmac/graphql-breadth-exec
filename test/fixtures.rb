@@ -53,14 +53,23 @@ SCHEMA
 SCHEMA = GraphQL::Schema.from_definition(SDL)
 
 class WriteValueResolver < GraphQL::BreadthExec::FieldResolver
-  def resolve(objects, _args, _ctx, _scope)
-    objects.each { _1["writeValue"]["value"] = _args["value"] }
-    objects.map { _1["writeValue"] }
+  def resolve(exec_field, _ctx)
+    exec_field.objects.each { _1["writeValue"]["value"] = exec_field.arguments[:value] }
+    exec_field.objects.map { _1["writeValue"] }
   end
 end
 
-class SimpleLoader < GraphQL::BreadthExec::Loader
-  def perform(keys)
+class SimpleLoader < GraphQL::BreadthExec::LazyLoader
+  def initialize(group: nil)
+    super()
+    @group = group
+  end
+
+  def map?
+    true
+  end
+
+  def perform_map(keys, _ctx)
     keys
   end
 end
@@ -70,8 +79,8 @@ class DeferredHashResolver < GraphQL::BreadthExec::FieldResolver
     @key = key
   end
 
-  def resolve(objects, _args, _ctx, scope)
-    scope.defer(SimpleLoader, group: "a", keys: objects.map { _1[@key] })
+  def resolve(exec_field, _ctx)
+    exec_field.lazy(loader_class: SimpleLoader, args: { group: "a" }, keys: exec_field.objects.map { _1[@key] })
   end
 end
 
@@ -99,11 +108,11 @@ BREADTH_RESOLVERS = {
   **GraphQL::BreadthExec::Introspection::TYPE_RESOLVERS,
   "Node" => {
     "id" => GraphQL::BreadthExec::HashKeyResolver.new("id"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.types.type(obj["__typename__"]) },
   },
   "HasMetafields" => {
     "metafield" => GraphQL::BreadthExec::HashKeyResolver.new("metafield"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.types.type(obj["__typename__"]) },
   },
   "Metafield" => {
     "key" => GraphQL::BreadthExec::HashKeyResolver.new("key"),
@@ -144,11 +153,11 @@ BREADTH_RESOLVERS = {
 BREADTH_DEFERRED_RESOLVERS = {
   "Node" => {
     "id" => DeferredHashResolver.new("id"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.types.type(obj["__typename__"]) },
   },
   "HasMetafields" => {
     "metafield" => DeferredHashResolver.new("metafield"),
-    "__type__" => ->(obj, ctx) { ctx[:query].get_type(obj["__typename__"]) },
+    "__type__" => ->(obj, ctx) { ctx.types.type(obj["__typename__"]) },
   },
   "Metafield" => {
     "key" => DeferredHashResolver.new("key"),

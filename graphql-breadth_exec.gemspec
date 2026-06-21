@@ -35,4 +35,5 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency 'memory_profiler'
   spec.add_development_dependency 'debug'
   spec.add_development_dependency 'graphql-batch'
+  spec.add_development_dependency 'sorbet'
 end

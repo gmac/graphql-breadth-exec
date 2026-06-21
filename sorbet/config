@@ -1,0 +1,8 @@
+--dir
+lib
+--dir
+sorbet/rbi
+--ignore=/test/
+--ignore=/benchmark/
+--ignore=/vendor/bundle/
+--ignore=prism.rbi

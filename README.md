@@ -1,136 +1,656 @@
 # Breadth-first GraphQL execution
 
-_**The proof-of-concept algorithm for Shopify's _GraphQL Cardinal_ engine**_
+_**The core algorithm backing Shopify's _GraphQL Cardinal_ engine.** Learn more about the breadth-first GraphQL design advantages in the [blog post](https://shopify.engineering/faster-breadth-first-graphql-execution). For a typescipt port, see [graphql-breadth-js](https://github.com/gmac/graphql-breadth-js)._
 
-_For a typescipt port of the final engine code, see [graphql-breadth-js](https://github.com/gmac/graphql-breadth-js)._
+# Support
 
-GraphQL requests have two dimensions: _depth_ and _breadth_. The depth dimension is finite as defined by the request document, while the breadth dimension scales by the width of response data (and can grow extremely large).
+The execution algorithm is proven at scale in production. This implementation still has some limitations:
 
-![Breadth/Depth](./images/graphql-axes.png)
+* Uses GraphQL Ruby schemas.
+* Currently no built-in validation or analysis, do it ahead of time.
+* No support for subscription, defer, or stream.
+* Supports input validations, but NOT input transformations (ie: "prepare" hooks).
 
-Traditional GraphQL implementations execute _depth-first_, which resolves every field of every object in the response individually, making resolver overhead (resolver calls, tracing, intermediary promises) scale by **depth × breadth**. By executing _breadth-first_, we instead resolve each selection depth only once with an aggregated set of objects, so resolver overhead scales by **depth-only**.
+# Usage
 
-![Execution flows](./images/exec-flow.png)
-
-This breadth-first design makes processing list repetitions considerably faster.
-
-```shell
-graphql-ruby (depth): 140002 resolvers
-   1.087 (± 0.0%) i/s  (919.76 ms/i) -  6.000 in  5.526807s
-graphql-breadth_exec 140002 resolvers
-   21.314 (± 9.4%) i/s   (46.92 ms/i) -  108.000 in  5.095015s
-
-Comparison:
-graphql-breadth_exec 140002 resolvers:   21.3 i/s
-graphql-ruby (depth): 140002 resolvers:   1.1 i/s - 19.60x  slower
-```
-
-## Batching advantages
-
-Breadth-first resolvers look a little different than we're used to: they recieve `objects` and return a mapped set.
+## Execute a query
 
 ```ruby
-def resolve(objects, args, cxt)
-  objects.map { ... }
-end
+executor = GraphQL::BreadthExec::Executor.build(
+  schema: MyGraphQLSchema,
+  document: GraphQL.parse(document),
+  root_object: { ... },
+  operation_name: "OperationName",
+  variables: { ... },
+  context: { ... },
+  tracers: [ ... ],
+)
+
+result = executor.result
 ```
 
-This makes all field instances inherently batched as a function of the engine without using Dataloader promise patterns. However, promises are still relevant for batching work _across field instances_ (ie: same field using different aliases, or different fields sharing a query, etc.). Promise patterns can be considerably more efficient in breadth execution by binding many objects to a single promise rather than generating a promise per object:
+## Execution taxonomy
 
-![Promises](./images/promises.png)
+A request document gets built into an execution tree. This taxonomy is provided during execution for sequencing actions. A request like this:
 
-## Napkin math
+```graphql
+query {
+  products(first: 10) {
+    nodes {
+      id
+      title
+    }
+  }
+}
+```
 
-**Assumption:** all GraphQL fields have some non-zero overhead cost associated with their execution. For simplicity, let's round up and say this cost is `1ms`.
+Gets built into an execution tree structured as the following pseudocode:
 
-**Scenario:** we resolve five fields (_depth_) across a list of 1000 objects (_breadth_).
+```ruby
+ExecutionScope.new(type: QueryRoot, fields: [
+  ExecutionField.new(key: "products", ExecutionScope.new(type: ProductConnection, fields: [
+    ExecutionField.new(key: "nodes", ExecutionScope.new(type: Product, fields: [
+      ExecutionField.new(key: "id"),
+      ExecutionField.new(key: "title"),
+    ]))
+  ]))
+])
+```
 
-* depth-first: we call 5000 field resolvers (_depth × breadth_) and incur `5s` (5 × 1000 × 1ms).
-* breadth-first: we call 5 field resolvers (_depth-only_) and incur only `5ms` (5 × 1ms).
+This taxonomy provides the following API, which is useful while writing resolver behaviors:
 
-Now assume each field operates lazily and returns a promise:
+* **`ExecutionField`**: represents a field to execute within a resolved object scope.
+  - `path`: the selection path leading to the field, composed of namespaces with no list indices.
+  - `key`: the namespace assigned by the field's selection alias or definition name.
+  - `type`: the GraphQL return type of the field, may be abstract with non-null and list wrappers.
+  - `arguments`: a frozen hash of arguments provided to the selection. Argument keys are `:snake_case` symbols. Argument transformations are intentionally do not supported (i.e. the input "prepare" hook); argument formatting should be done holistically in the resolver.
+  - `mutable_arguments`: a mutable clone of the arguments hash that can be modified.
+  - `definition`: the associated GraphQL field definition. For schema reference only (avoid repurposing legacy implementation details).
+  - `scope`: the parent execution scope that this field belongs to.
+  - `resolve_all(<value>)`: resolves a value mapped to all field objects. Useful for early returns.
+  - `preload(<LazyLoader>, keys: [...]?, args: { ... }?)`: Registers a lazy preloader to run before the field executes. May only be called by field planner methods.
+  - `lazy(<LazyLoader>?, keys: [...], args: { ... }?)`: defers to lazy execution and returns a Promise. Similar to GraphQL Batch with some fundamental changes, see [documentation](#lazy-resolvers). May only be called by field resolver methods.
+  - `attributes`: a hash intended for local caching and freeform planning notes.
+  - `attribute(<name>)`: reads an attribute without allocating storage.
+  - `attribute?(<name>)`: checks an attribute without allocating storage.
+* **`ExecutionScope`**: represents a resolved object scope with a known concrete object type.
+  - `path`: selection path leading to the scope, composed of namespaces with no list indices.
+  - `parent`: the execution scope above this one.
+  - `parent_field`: the execution field in the parent scope that opened this scope.
+  - `parent_type`: the GraphQL object type of the scope. This is always a resolved object type, never an abstract interface or union.
+  - `abstraction`: for scopes resolved through an interface or union, this details characteristics of that abstraction.
+  - `preload(<LazyLoader>, keys: [...]?, args: { ... }?)`: Registers a lazy preloader to run before the scope executes. May only be called by planner methods.
+  - `attributes`: a hash intended for local caching and freeform planning notes.
+  - `attribute(<name>)`: reads an attribute without allocating storage.
+  - `attribute?(<name>)`: checks an attribute without allocating storage.
 
-* depth-first: we build and resolve 5000 intermediary promises (_depth × breadth_).
-* breadth-first: we build and resolve 5 intermediary promises (_depth-only_).
+**An execution tree can only be traversed from the bottom-up**. This is extremely intentional, because traversing top-down can never see through unresolved abstractions.
 
-Now assume we chain a `.then` onto the lazy promise resolution:
+## Field resolvers
 
-* depth-first: we build and resolve 10,000 intermediary promises (_depth × breadth × 2_).
-* breadth-first: we build and resolve 10 intermediary promises (_depth × 2_).
-
-## Noteworthy design patterns
-
-- Fields are resolved breadth-first using implicitly batched resolvers (no Dataloader). These run longer and hotter on application logic with no execution overhead.
-- Stack profiling becomes much more organized with a linear flow and aggregate field spans, rather than fields getting split up across subtree repetitions.
-- Batched resolvers may bind entire load sets to a single lazy promise to dramatically reduce promise bloat.
-- The engine is driven by enqueuing rather than recursion, which shrinks stack traces and reduces memory usage.
-- Error handling is isolated into a second pass that only runs when errors occur. The engine collects all errors, and formatting grooms which ones to return.
-
-This repo is an extremely early proof-of-concept of these patterns. This core engine flow has matured into Shopify's GraphQL Cardinal engine that now runs much of their production traffic; these patterns are also being matured for the open source community in [graphql-ruby](https://github.com/rmosolgo/graphql-ruby/pull/5509).
-
-## Prototype usage
-
-To experiment with this prototype, you can setup a `GraphQL::BreadthExec::FieldResolver`:
+For each field implementation, set up a `GraphQL::BreadthExec::FieldResolver` or use a [keyword helper](#resolver-keywords):
 
 ```ruby
 class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
-   def resolve(objects, args, ctx, scope)
-      map_sources(objects) { |obj| obj.my_field }
+   def resolve(exec_field, context)
+      exec_field.map_objects { |object| object.some_method }
    end
 end
 ```
 
-A field resolver provides:
+A field resolver receives:
 
-* `objects`: the array of objects to resolve the field on.
-* `args`: the coerced arguments provided to this selection field.
-* `ctx`: the request context.
-* `scope`: (experimental) a handle to the execution scope that invokes lazy hooks.
+* `exec_field`: the execution field providing resources for the scope with [many useful properties](#execution-taxonomy), most importantly:
+   - `exec_field.objects`: the set of objects being resolved.
+   - `exec_field.arguments`: a hash of resolved arguments provided to the field.
+* `context`: the request context.
 
-A resolver must return a mapped set of data for the provided objects. Always use the `map_sources` helper for your mapping loop to assure that exceptions are captured properly. You may return errors for a field position by mapping an `ExecutionError` into it:
+A resolver **must return a mapped set of results** for the field's objects, or invoke a [lazy resolver hook](#lazy-resolvers). To attach a field resolver to a field, use the `GraphQL::BreadthExec::HasBreadthResolver` field mixin:
+
+```ruby
+class BaseField < GraphQL::Schema::Field
+  include GraphQL::BreadthExec::HasBreadthResolver::Field
+end
+
+class BaseObject < GraphQL::Schema::Object
+  field_class BaseField
+end
+
+class MyObject < BaseObject
+  field :featured_products, -> { [Product] } do |f|
+    f.breadth_resolver = MyFieldResolver.new
+  end
+end
+```
+
+### Built-in resolvers
+
+The core library includes several basic resolvers for common needs:
+
+* `GraphQL::BreadthExec::MethodResolver.new(:method_to_call, ...)` (chained methods)
+* `GraphQL::BreadthExec::HashKeyResolver.new("some_key")` (symbol or string key)
+* `GraphQL::BreadthExec::ValueResolver.new(true)` (static value)
+* `GraphQL::BreadthExec::SelfResolver.new` (resolves original objects)
+
+### Early return
+
+Field resolvers may return early with a value for all objects using `resolve_all`. This is commonly used to resolve `nil` or an eager value across all field objects.
 
 ```ruby
 class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
-   def resolve(objects, args, ctx, scope)
-      map_sources(objects) do |obj|
-         obj.valid? ? obj.my_field : GraphQL::BreadthExec::ExecutionError.new("Object field not valid")
+   def resolve(exec_field, context)
+      return exec_field.resolve_all(nil) if exec_field.arguments[:key].nil?
+
+      # otherwise... resolve something else
+   end
+end
+```
+
+### Attribute caches
+
+Field resolvers may build resources that could be shared with other fields across their scope. It's easy to share this sort of data using `attributes`. Both execution fields [and their scopes](#execution-taxonomy) support setting attributes:
+
+```ruby
+class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
+   def resolve(exec_field, context)
+      # cache wrapped objects on the parent scope...
+      wrapped_objects = exec_field.scope.attributes[:wrapped_objects] ||= begin
+        exec_field.objects.map { |obj| MyWrapper.new(obj) }
+      end
+
+      wrapped_objects.map(&:wrapper_method)
+   end
+end
+```
+
+When reading attributes, prefer using `element.attribute(key)` to avoid allocating unnecessary storage.
+
+### Error handling
+
+To error out specific object positions within a field, error instances must be mapped into the field's result set. Use the `handle_or_reraise` helper within a StandardError rescue block to optimally handle raised mapping errors:
+
+```ruby
+class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
+   def resolve(exec_field, context)
+      exec_field.objects.map do |obj|
+        obj.valid? ? obj.my_field : GraphQL::ExecutionError.new("Not valid")
+      rescue StandardError => e
+        exec_field.handle_or_reraise(e)
       end
    end
 end
 ```
 
-Now setup a resolver map:
+This pattern is so common that it's provided as the `map_objects` helper. Just remember when calling `map_objects` that the results may include inlined error positions:
 
 ```ruby
-RESOLVER_MAP = {
-  "MyType" => {
-    "myField" => MyFieldResolver.new,
-  },
-  "Query" => {
-    "myType" => MyTypeResolver.new,
-  },
-}.freeze
+class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
+   def resolve(exec_field, context)
+      exec_field.map_objects(&:do_stuff!) # << maps to results OR inlined errors
+   end
+end
 ```
 
-Now parse your schema definition and execute requests:
+Any error raised during field execution _outside_ of a rescued mapping loop will result in all field objects receiving the same error:
 
 ```ruby
-SCHEMA = GraphQL::Schema.from_definition(%|
-  type MyType {
-    myField: String
-  }
-  type Query {
-    myType: MyType
-  }
-|)
+class MyFieldResolver < GraphQL::BreadthExec::FieldResolver
+   def resolve(exec_field, context)
+      raise GraphQL::ExecutionError.new("no key") if exec_field.arguments[:key].nil?
 
-result = GraphQL::BreadthExec::Executor.new(
-   SCHEMA,
-   RESOLVER_MAP,
-   GraphQL.parse(query),
-   {}, # root object
-   variables: { ... },
-   context: { ... },
-   tracers: [ ... ],
-).perform
+      exec_field.map_objects(&:do_stuff!)
+   end
+end
 ```
+
+## Lazy resolvers
+
+Breadth field resolvers receive sets, which provides implicit batching for a single field instance. However, this doesn't take into account the same field loading at multiple document positions, or different fields sharing a query. For example:
+
+```graphql
+query {
+  product(id: "1") {
+    featuredMedia {
+      ...on Image { sources } # loads image sources
+    }
+    media(first: 10) {
+      nodes {
+        ...on Image { sources } # loads image sources
+      }
+    }
+  }
+}
+```
+
+In the above, we'll want `Image.sources` to batch across all instances of the field, even at different document depths. LazyLoader solves this – which is breadth's analog to traditional dataloaders. Unlike traditional dataloaders though, a breadth LazyLoader binds entire key sets to a single promise, rather than building 1:1 promises. This dramatically reduces lazy overhead.
+
+### Resolver-specific lazy loading
+
+For the simplest loading scenarios, field resolvers can delegate to their own lazy loading hook with keys that will batch across instances of the field:
+
+```ruby
+class BasicLazyResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, context)
+    exec_field.lazy(keys: exec_field.objects.map(&:id))
+  end
+
+  def perform_lazy(keys, args, context)
+    things_by_key = Thing.where(parent_id: keys).index_by(&:parent_id)
+    keys.map { |key| things_by_key[key] }
+  end
+end
+```
+
+Calling `exec_field.lazy` defers a set of keys for lazy fulfillment, which then get loaded by the resolver's `perform_lazy` hook that **must return a mapped set of results**. You can also scope lazy loading with arguments, and wrap it with pre- and post-processing steps:
+
+```ruby
+class FancyLazyResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, context)
+    mapped_keys = exec_field.objects.map { |obj| obj.valid? ? obj.id : nil }
+
+    exec_field
+      .lazy(args: { group: "a" }, keys: mapped_keys)
+      .then do |loaded_records|
+        loaded_records.map! { |record| record&.my_field }
+      end
+  end
+
+  def perform_lazy(keys, args, context)
+    things_by_key = Thing.where(parent_id: keys, group: args[:group]).index_by(&:parent_id)
+    keys.map { |key| things_by_key[key] }
+  end
+end
+```
+
+### Nil keys
+
+It's extremely common for a mapped set of lazy keys to have `nil` positions that must be retained to match the resolver's breadth set. These nil keys should almost never be loaded, so they are omitted from batching and resolve as nil by default. If you specifically want to treat nil as a loadable value, specify `load_nil_keys: true`.
+
+```ruby
+class MaybeNilKeysResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, context)
+    mapped_keys = exec_field.objects.map { |obj| obj.ready? ? obj.id : nil }
+
+    exec_field.lazy(keys: mapped_keys, load_nil_keys: true)
+  end
+
+  def perform_lazy(keys, args, context)
+    # ... keys may include nil!
+  end
+end
+```
+
+### Eager values
+
+In many cases, a resolver can eagerly evaluate the result of some keys. Use `eager_values` to inject pre-resolved values into a lazy loader:
+
+```ruby
+class MaskingResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, _context)
+    eager_values = {}
+    mapped_keys = exec_field.objects.map do |obj|
+      # statically resolve "zebra" key as "HORSE"...
+      eager_values[obj.key] = "HORSE" if obj.key == "zebra"
+      obj.key
+    end
+
+    exec_field.lazy(keys: mapped_keys, eager_values: eager_values)
+  end
+
+  def perform_lazy(keys, args, context)
+    # ... keys won't include "zebra"
+  end
+end
+```
+
+Eager values are specific to their field instance and will _not_ be shared by fields [using the same loader](#shared-lazy-loading). Eager values override the loader cache, so a specific field instance may eagerly resolve its own value for a key while other fields sharing the loader will still load the key as normal.
+
+### Shared lazy loading
+
+Queries shared across field resolvers need a common LazyLoader class.
+
+```ruby
+class SharedLoader < GraphQL::BreadthExec::LazyLoader
+  def initialize(group:)
+    super()
+    @group = group
+  end
+
+  def perform(ids, context)
+    Thing.where(parent_id: ids, group: @group).to_a.each do |thing|
+      fulfill_key(thing.parent_id, thing)
+    end
+  end
+end
+
+class SharedLazyResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, context)
+    mapped_keys = exec_field.objects.map { |obj| obj.valid? ? obj.id : nil }
+
+    exec_field
+      .lazy(SharedLoader, args: { group: "a" }, keys: mapped_keys)
+      .then do |loaded_records|
+        loaded_records.map! { |record| record&.my_field }
+      end
+  end
+end
+```
+
+In this case `exec_field.lazy` is called with a LazyLoader class, which delegates loading to an instance of the provided loader class rather than the resolver's own `perform_lazy` method. Within a loader class, call `fulfill_key` to deliver each loaded record. Lazy loaders do NOT require fulfillment of each provided key; unfulfilled keys simply return as `nil`. You can also set up a lazy loader class to fulfill by mapped set, although this frequently adds a mapping layer that calling `fulfill_key` directly would avoid:
+
+```ruby
+class MapLoader < GraphQL::BreadthExec::LazyLoader
+  def map? = true
+
+  def perform_map(keys, context)
+    things_by_key = Thing.where(parent_id: keys).index_by(&:parent_id)
+    keys.map { |key| things_by_key[key] }
+  end
+end
+```
+
+### LazyLoader keys vs identities
+
+Lazy loaders support passing any complex object as loader keys. These complex objects can be reduced to a primitive identity within the loader's internal mapping table using the `identity_for` hook:
+
+```ruby
+class IdentityLoader < GraphQL::BreadthExec::LazyLoader
+  def identity_for(key)
+    "#{key.path}/#{key.handle}"
+  end
+
+  def perform(keys, context)
+    Thing.load_by_references(keys).each do |thing|
+      fulfill_identity("#{thing.path}/#{thing.handle}", thing)
+    end
+  end
+end
+```
+
+Later on, it may be simpler to derive the same identity via the loaded result and deliver it via `fulfill_identity` rather than trying to map the record back to a complex key.
+
+### Awaiting and chaining
+
+Multiple loads can be built and awaited:
+
+```ruby
+class AwaitingResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, _context)
+    keys = exec_field.objects.map(&:key)
+
+    a = exec_field.lazy(PrefixLoader, args: { prefix: "a" }, keys: keys)
+    b = exec_field.lazy(PrefixLoader, args: { prefix: "b" }, keys: keys)
+
+    exec_field
+      .await_all([a, b])
+      .then do |results_a, results_b|
+        exec_field.objects.map.with_index do |i|
+          "#{results_a[i]} + #{results_b[i]}"
+        end
+      end
+  end
+end
+```
+
+Lazy sequencing can be chained:
+
+```ruby
+class ChainingResolver < GraphQL::BreadthExec::FieldResolver
+  def resolve(exec_field, _context)
+    exec_field
+      .lazy(PrefixLoader, args: { prefix: "a" }, keys: exec_field.objects.map(&:key))
+      .then { |results_a| exec_field.lazy(PrefixLoader, args: { prefix: "b" }, keys: results_a) }
+      .then { |results_b| results_b.map { |b| "#{b}-fin" } }
+  end
+end
+```
+
+## Query planning
+
+The breadth executor operates on an [execution tree](#execution-taxonomy) in three phases:
+
+1. The execution tree is built from top-down, omitting abstract positions.
+2. A planning pass runs from bottom-up on the constructed tree. Fields may register actions on their ancestors.
+3. The final execution pass runs from top-down, performing planned actions when encountered.
+
+These three phases repeat each time an abstract position is resolved to build, plan, and execute its resulting subtree. The planning phase allows fields to consider their place within the execution tree and plan accordingly.
+
+### Planning hooks
+
+A field resolver may define a `plan` method that runs during the field's planning phase. This hook may register preloads and/or make tree annotations. Its return value is never captured or used.
+
+```ruby
+class WidgetResolver < GraphQL::BreadthExec::FieldResolver
+  def plan(exec_field, context)
+    exec_field.preload(AssociationLazyLoader, args: { association: :sprockets })
+  end
+
+  def resolve(exec_field, context)
+    # resolve the field...
+  end
+end
+```
+
+### Lazy preloads
+
+Both execution scopes and fields may bind lazy loaders during the planning phase that will perform preloads before the element executes. Use the `preload` method:
+
+```ruby
+class AssociationPreload < GraphQL::BreadthExec::LazyLoader
+  def initialize(association:)
+    super()
+    @association = association
+  end
+
+  def perform(objects, context)
+    ActiveRecord::Associations::Preloader.new(records: objects, associations: @association).call
+    objects.each { |obj| fulfill_key(obj, obj.public_send(@association)) }
+  end
+end
+
+class WidgetResolver < GraphQL::BreadthExec::FieldResolver
+  def plan(exec_field, context)
+    exec_field.preload(AssociationPreload, args: { association: :sprockets })
+    # or ...
+    exec_field.scope.preload(AssociationPreload, args: { association: :sprockets })
+  end
+end
+```
+
+The `preload` method can ONLY be called from within a `plan` hook and its chained preload callbacks, which all run prior to the element executing. Calling `preload` within a field resolver after execution starts will raise a `LazySequencingError`.
+
+**Preloading Scopes vs Fields**
+
+All fields share objects with their scope, so preloading at either level achieves a similar result. However, the timing is subtly different. Preloading a _scope_ will block entering the scope until its preloads are complete; preloading on a _field_ will only block the field itself while allowing sibling fields in the scope to be traversed, thus allowing the discovery of other batching targets among sibling subtrees.
+
+So – scope preloads are useful for loading authorization dependencies and/or shared context; otherwise field preloads are generally preferable for localizing dependencies and blocking as little eager discovery as possible.
+
+**Preload keys**
+
+The `preload` method does not require loader keys and will use the scope or field's resolved objects as keys by default. You can also manually pass keys, which is useful when chaining:
+
+```ruby
+class WidgetResolver < GraphQL::BreadthExec::FieldResolver
+  def plan(exec_field, context)
+    exec_field
+       # uses the field's resolved objects as keys...
+      .preload(AssociationPreload, args: { association: :sprockets })
+      .then do |sprockets|
+        exec_field
+          # manually passes preloaded sprockets as keys...
+          .preload(AssociationPreload, args: { association: :prices }, keys: sprockets)
+      end
+  end
+end
+```
+
+### Preloads hooks
+
+Some lazy preloads may need to be configured at the time of execution when objects are actually avaiable for a scope or field. The `on_preload` hook may be used during planning to configure preloads in a just-in-time manner.
+
+```ruby
+class WidgetResolver < GraphQL::BreadthExec::FieldResolver
+  def plan(exec_field, context)
+    exec_field.on_preload do
+      widgets = exec_field.objects.grep(Widget)
+      exec_field.preload(AssociationLoader, keys: widgets, args: { association: :prices })
+    end
+  end
+end
+```
+
+### Planning root
+
+It's useful to use the root scope as a preload target where all fields in the document can pool common work (ex: loading auth dependencies into a context cache). However –  abstract selection branches are planned _lazily after resolution_, at which time the document above their subtree has been sealed and no longer accepts preloads. Use `planning_root` to always locate the highest unplanned scope and operate there:
+
+```ruby
+class WidgetResolver < GraphQL::BreadthExec::FieldResolver
+  def plan(exec_field, context)
+    exec_field.scope.planning_root.preload(AuthContextLoader, keys: [context[:agent].id])
+  end
+end
+```
+
+While navigating up the execution tree, you may call `allows_preload?` on scopes and fields to check their status. This check always returns false for taxonomy above the current `planning_root`.
+
+### Attribute annotations
+
+It can be useful to make notes about the execution tree while planning. Both execution scopes and fields provide an `attributes` hash for freeform annotations:
+
+```ruby
+class WidgetResolver < GraphQL::BreadthExec::FieldResolver
+  def plan(exec_field, context)
+    ancestor_scope = exec_field.scope&.parent
+    if ancestor_scope && ancestor_scope.parent_type == Sprocket
+      ancestor_scope.attributes[:include_widgets_sql] = true
+    end
+  end
+end
+```
+
+Once tree annotations are set during the planning phase, field resolvers can respond accordingly to their notes while executing. When reading attributes, prefer using `element.attribute(key)` to avoid allocating unnecessary storage.
+
+## Authorization
+
+The breadth executor includes a authorization model that can be customized as needed. Create a `GraphQL::BreadthExec::Authorization` subclass and pass it to your executor:
+
+```ruby
+class MyAuthorization < GraphQL::BreadthExec::Authorization
+  # ... detail auth behaviors
+end
+
+GraphQL::BreadthExec::Executor.build(
+  authorization: MyAuthorization,
+)
+```
+
+Authorization gates access at three grains: permission to access types, permission to access fields, and permission to access resolved objects. These grains are configured with the following authorization method implementations:
+
+* `authorized_type?(type, context, exec_field: nil)`: checks if a type may be accessed before entering a scope of the type, and before executing a field that returns the type.
+* `authorized_field?(exec_field, context)`: checks if a field may be accessed before executing its resolver. This should _only_ check if the field itself is authorized; it should NOT consider the field's owner type and/or return type, which are both covered by direct type checks (see above).
+* `authorize_objects_in_scope?(exec_scope, context)`: checks if object-level authorization checks should run in this scope.
+* `unauthorized_object_indices(exec_scope, context)`: checks authorization on all scope objects, and returns an invalidation map formatted as `Hash[Integer, StandardError?]`. The returned hash maps object indicies to their corresponding authorization errors. An empty hash means no objects were invalidated.
+
+## Runtime directives
+
+Breadth execution supports runtime directive behaviors applied to the `QUERY | MUTATION | FIELD` locations. While a schema may define runtime directives in other document locations, these are for AST reference only and provide no execution hooks.
+
+**This is an operation-level directive (`QUERY | MUTATION` locations):**
+
+```graphql
+query @inContext(lang: EN) {
+  myField
+}
+```
+
+**These are field-level directives (`FIELD` location):**
+
+```graphql
+query {
+  thing @language(lang: EN) {
+    title
+    child @language(lang: FR) {
+      title
+    }
+  }
+}
+```
+
+To implement a runtime directive, set up a `BreadthExec::DirectiveResolver` and assign it to the directive class:
+
+```ruby
+class LanguageDirectiveResolver < DirectiveResolver
+  def resolve(exec_directive, context, current_field: nil)
+    return if current_field.nil?
+
+    current_field.attribute[:lang] = exec_directive.arguments[:lang]
+  end
+end
+
+class Language < GraphQL::Schema::Directive
+  extend GraphQL::BreadthExec::HasBreadthResolver::Directive
+
+  graphql_name("language")
+  argument :lang, String, required: true
+  locations QUERY, MUTATION, FIELD
+
+  self.breadth_resolver = LanguageDirectiveResolver.new
+end
+```
+
+### Wrapping directives
+
+Directive resolvers can be configured as block wrappers around all of GraphQL execution (QUERY / MUTATION), or around the execution of a field (FIELD). Wrapping is disabled by default because it adds overhead. To enable wrapping for a specific directive, enable it for the resolver and include a `yield` in its resolver, or pass the resolver `&block` forward:
+
+```ruby
+class InContextDirectiveResolver < DirectiveResolver
+  def initialize
+    super(wraps: true)
+  end
+
+  def resolve(exec_directive, context, current_field: nil, &block)
+    MyI18N.with_context(exec_directive.arguments[:lang], &block) # << must yield
+  end
+end
+```
+
+**Return note:** wrapping directives must return their block result; non-wrapping directives have no return expectations.
+
+**Lazy loading note:** fields are only wrapped by directives during their primary execution pass. If a wrapped field defers to a lazy loader, it must pass any directive state as an argument to the loader. This both preserves the state and assures the field doesn't batch with other fields of different state. Wrapping at the root operation level assigns global execution state that is consistent across both eager and lazy field executions.
+
+### Cascading directives
+
+Breadth execution runs field resolvers via flat queuing rather than recursively, which changes conventional expectations around tree nesting slightly. Consider this example:
+
+```graphql
+query {
+  a @language(lang: EN) {
+    title
+    b {
+      title
+    }
+    c @language(lang: FR) {
+      title
+    }
+  }
+}
+```
+
+We expect `a` to assign a base language of `EN` that `b` inherits, and then `c` overrides with a more specific setting. Breadth execution achieves this by marking directives as _cascading_. A cascading directive will be passed down to all of its child fields within a stacking queue. A field execution then runs all directives that it inherited in the order they were queued, followed by any directives defined on the field itself.
+
+```ruby
+class LanguageDirectiveResolver < DirectiveResolver
+  def initialize
+    super(cascades: true)
+  end
+
+  def resolve(exec_directive, context, current_field: nil)
+    return if current_field.nil?
+
+    # repeatedly write each cascading directive's value onto the field; last one wins...
+    current_field.attribute[:lang] = exec_directive.arguments[:lang]
+  end
+end
+```
+
+This architecture makes cascading resolvers run repeatedly on every field in a subtree, rather than just once at the top of the owning field's subtree. This pattern is more granular and generally safer for isolation and parallelism, though has more resolver churn than a typical depth traversal so should be used accordingly.
