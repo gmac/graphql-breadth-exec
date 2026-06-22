@@ -63,14 +63,30 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
       subscription_executor(%|subscription { onWriteValue { value } }|).result
     end
 
-    assert_equal "Use result_or_subscribe for subscription operations", error.message
+    assert_equal "Use subscribe for subscription operations", error.message
   end
 
-  def test_result_or_subscribe_returns_subscription_response_stream_for_subscription_operation
+  def test_incremental_result_raises_for_subscription_operation
+    error = assert_raises(GraphQL::BreadthExec::ImplementationError) do
+      subscription_executor(%|subscription { onWriteValue { value } }|).incremental_result
+    end
+
+    assert_equal "Use subscribe for subscription operations", error.message
+  end
+
+  def test_subscribe_raises_for_query_operation
+    error = assert_raises(GraphQL::BreadthExec::ImplementationError) do
+      subscription_executor(%|{ noop }|).subscribe
+    end
+
+    assert_equal "Only allowed for subscription operations", error.message
+  end
+
+  def test_subscribe_returns_subscription_response_stream_for_subscription_operation
     result = subscription_executor(
       %|subscription { onWriteValue { value } }|,
       root_object: { "events" => [{ "value" => "direct" }] },
-    ).result_or_subscribe
+    ).subscribe
 
     assert_instance_of GraphQL::BreadthExec::SubscriptionResponseStream, result
     assert_equal [{ "data" => { "onWriteValue" => { "value" => "direct" } } }], result.to_a
@@ -79,7 +95,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
   def test_subscribe_reports_graphql_execution_error_from_source_resolver
     resolver = SourceResolver.new(subscribe: ->(_exec_field, _ctx) { raise GraphQL::ExecutionError, "Cannot subscribe" })
 
-    result = subscription_executor(%|subscription { onWriteValue { value } }|, source_resolver: resolver).result_or_subscribe
+    result = subscription_executor(%|subscription { onWriteValue { value } }|, source_resolver: resolver).subscribe
 
     assert_equal "Cannot subscribe", result.dig("errors", 0, "message")
     assert_equal ["onWriteValue"], result.dig("errors", 0, "path")
@@ -90,7 +106,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
       subscription_executor(
         %|subscription { onWriteValue { value } }|,
         source_resolver: GraphQL::BreadthExec::SelfResolver.new,
-      ).result_or_subscribe
+      ).subscribe
     end
 
     assert_equal "FieldResolver#subscribe must be implemented.", error.message
@@ -100,17 +116,17 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     resolver = SourceResolver.new(subscribe: ->(_exec_field, _ctx) { Object.new })
 
     error = assert_raises(GraphQL::BreadthExec::ImplementationError) do
-      subscription_executor(%|subscription { onWriteValue { value } }|, source_resolver: resolver).result_or_subscribe
+      subscription_executor(%|subscription { onWriteValue { value } }|, source_resolver: resolver).subscribe
     end
 
     assert_equal "Subscription source must return an Enumerable", error.message
   end
 
   def test_subscribe_raises_for_lazy_source_setup
-    resolver = SourceResolver.new(subscribe: ->(_exec_field, _ctx) { GraphQL::BreadthExec::ExecutionPromise.new })
+    resolver = SourceResolver.new(subscribe: ->(_exec_field, _ctx) { GraphQL::BreadthExec::Executor::ExecutionPromise.new })
 
     error = assert_raises(GraphQL::BreadthExec::ImplementationError) do
-      subscription_executor(%|subscription { onWriteValue { value } }|, source_resolver: resolver).result_or_subscribe
+      subscription_executor(%|subscription { onWriteValue { value } }|, source_resolver: resolver).subscribe
     end
 
     assert_equal "Subscription source must return an Enumerable", error.message
@@ -120,7 +136,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     stream = subscription_executor(
       %|subscription { onWriteValue { value } }|,
       root_object: { "events" => [{ "value" => "first" }] },
-    ).result_or_subscribe
+    ).subscribe
 
     assert_instance_of GraphQL::BreadthExec::SubscriptionResponseStream, stream
     assert_equal(
@@ -139,7 +155,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
           { "value" => "third" },
         ],
       },
-    ).result_or_subscribe
+    ).subscribe
 
     assert_equal(
       [
@@ -165,7 +181,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     stream = subscription_executor(
       %|subscription { onWriteValue { value } }|,
       root_object: { "events" => source_stream },
-    ).result_or_subscribe
+    ).subscribe
 
     deliveries = Queue.new
     stream_errors = Queue.new
@@ -208,7 +224,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
       source_resolver: resolver,
       root_object: { "events" => [{ "payload" => { "value" => "from resolver" } }] },
       context: { test_context: "ctx" },
-    ).result_or_subscribe
+    ).subscribe
 
     assert_equal [{ "data" => { "onWriteValue" => { "value" => "from resolver" } } }], stream.to_a
     assert_equal [[{}, "ctx"]], resolver.subscribe_calls
@@ -219,7 +235,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     stream = subscription_executor(
       %|subscription { onWriteValue { lazyValue } }|,
       root_object: { "events" => [{ "lazyValue" => "loaded" }] },
-    ).result_or_subscribe
+    ).subscribe
 
     assert_equal(
       [{ "data" => { "onWriteValue" => { "lazyValue" => "loaded" } } }],
@@ -231,7 +247,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     stream = subscription_executor(
       %|subscription { onWriteValue { error } }|,
       root_object: { "events" => [{ "value" => "bad" }] },
-    ).result_or_subscribe
+    ).subscribe
 
     assert_equal(
       [{
@@ -255,7 +271,7 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     stream = subscription_executor(
       %|subscription { onWriteValue { value } }|,
       root_object: { "events" => source_stream },
-    ).result_or_subscribe
+    ).subscribe
 
     responses = []
     error = assert_raises(RuntimeError) do
@@ -266,21 +282,21 @@ class GraphQL::BreadthExec::Executor::SubscriptionsTest < Minitest::Test
     assert_equal [{ "data" => { "onWriteValue" => { "value" => "before error" } } }], responses
   end
 
-  def test_result_or_subscribe_returns_same_stream_when_called_twice
+  def test_subscribe_returns_same_stream_when_called_twice
     executor = subscription_executor(%|subscription { onWriteValue { value } }|)
 
-    stream = executor.result_or_subscribe
+    stream = executor.subscribe
 
-    assert_same stream, executor.result_or_subscribe
+    assert_same stream, executor.subscribe
   end
 
   def test_result_raises_after_subscription_response_stream_was_created
     executor = subscription_executor(%|subscription { onWriteValue { value } }|)
 
-    executor.result_or_subscribe
+    executor.subscribe
     error = assert_raises(GraphQL::BreadthExec::ImplementationError) { executor.result }
 
-    assert_equal "Use result_or_subscribe for subscription operations", error.message
+    assert_equal "Use subscribe for subscription operations", error.message
   end
 
   private

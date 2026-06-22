@@ -2,13 +2,34 @@
 
 _**The core algorithm backing Shopify's _GraphQL Cardinal_ engine.** Learn more about the breadth-first GraphQL design advantages in the [blog post](https://shopify.engineering/faster-breadth-first-graphql-execution). For a typescipt port, see [graphql-breadth-js](https://github.com/gmac/graphql-breadth-js)._
 
+* Runs field executions breadth-first, layer by layer (versus depth-first, tree by tree).
+* Individual resolvers are implicitly batched.
+* Lazy resolvers sharing I/O bind entire object sets to a single promise.
+* Processes via queuing rather than recursion.
+
+```
+ruby 3.2.1 (2023-02-08 revision 31819e82c8) +YJIT [arm64-darwin23]
+
+Non-lazy comparison:
+graphql-breadth_exec: 1000 x 3 scalars:     1257.1 i/s
+graphql-ruby resolve_batch: 1000 x 3 scalars:      773.2 i/s - 1.63x  slower
+graphql-ruby classic: 1000 x 3 scalars:      102.0 i/s - 12.32x  slower
+
+Lazy comparison:
+graphql-breadth_exec LazyLoader: 1000 x 1 lazy scalar:     2469.5 i/s
+graphql-ruby execute_next + dataloader: 1000 x 1 lazy scalar:      533.1 i/s - 4.63x  slower
+graphql-ruby execute_next + graphql-batch: 1000 x 1 lazy scalar:      291.7 i/s - 8.47x  slower
+graphql-ruby graphql-batch: 1000 x 1 lazy scalar:      178.7 i/s - 13.82x  slower
+graphql-ruby dataloader: 1000 x 1 lazy scalar:      114.6 i/s - 21.56x  slower
+```
+
 # Support
 
 The execution algorithm is proven at scale in production. This implementation still has some limitations:
 
 * Uses GraphQL Ruby schemas.
 * Currently no built-in validation or analysis, do it ahead of time.
-* Currently no defer or stream.
+* Currently no stream.
 * Supports input validations, but NOT input transformations (ie: "prepare" hooks).
 
 # Usage
@@ -656,9 +677,29 @@ end
 
 This architecture makes cascading resolvers run repeatedly on every field in a subtree, rather than just once at the top of the owning field's subtree. This pattern is more granular and generally safer for isolation and parallelism, though has more resolver churn than a typical depth traversal so should be used accordingly.
 
+## Incremental results (`@defer`)
+
+Query and mutation operations that may contain `@defer` should use `incremental_result`. This always returns a `GraphQL::BreadthExec::Incremental::Result`, even when the operation has no active deferred work:
+
+```ruby
+result = executor.incremental_result
+
+deliver(result.initial_result)
+
+if result.incremental?
+  result.subsequent_results.each do |payload|
+    deliver(payload)
+  end
+end
+```
+
+When no deferred work is active, `initial_result` is the normal GraphQL result hash and `incremental?` is false. When deferred work is active, `initial_result` includes pending records and `hasNext`, and `subsequent_results` yields later incremental payloads.
+
+The basic and incremental entry points are intentionally strict. Call either `result` OR `incremental_result` for a query or mutation executor depending on the request's support for incremental delivery (ex: multi-part and SSE requests); switching entry points after execution has started raises an implementation error.
+
 ## Subscriptions
 
-Query and mutation execution use `result`, which always returns a normal GraphQL result hash. If a controller accepts subscription operations, use `result_or_subscribe` instead. For query and mutation operations it returns the same result hash as `result`; for subscription operations it returns a `GraphQL::BreadthExec::SubscriptionResponseStream` on successful source setup, or a normal GraphQL result hash for public setup errors. Calling `result` for a subscription operation raises an implementation error.
+Query and mutation execution use `result`, which always returns a normal GraphQL result hash. Subscription operations use `subscribe`, which returns a `GraphQL::BreadthExec::SubscriptionResponseStream` on successful source setup, or a normal GraphQL result hash for public setup errors. Each entry point is strict about its operation type, matching the `execute` / `subscribe` split in graphql-js: calling `result` (or `incremental_result`) for a subscription operation raises an implementation error, and calling `subscribe` for a query or mutation operation raises an implementation error. A controller that accepts both inspects the operation type and dispatches accordingly:
 
 ```ruby
 executor = GraphQL::BreadthExec::Executor.new(
@@ -668,14 +709,13 @@ executor = GraphQL::BreadthExec::Executor.new(
   context: { ... },
 )
 
-response = executor.result_or_subscribe
-
-if response.is_a?(GraphQL::BreadthExec::SubscriptionResponseStream)
-  response.each do |event_result|
+if executor.subscription?
+  stream = executor.subscribe
+  stream.each do |event_result|
     deliver(event_result)
   end
 else
-  deliver(response)
+  deliver(executor.result)
 end
 ```
 
@@ -726,7 +766,7 @@ executor = GraphQL::BreadthExec::Executor.new(
   context: { write_value_events: write_value_events },
 )
 
-stream = executor.result_or_subscribe
+stream = executor.subscribe
 stream.each do |event_result|
   # {"data"=>{"onWriteValue"=>{"value"=>"first"}}}
   # {"data"=>{"onWriteValue"=>{"value"=>"second"}}}

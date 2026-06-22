@@ -1,5 +1,7 @@
 --dir
 lib
+--parser=prism
+--enable-experimental-rbs-comments
 --dir
 sorbet/rbi
 --ignore=/test/

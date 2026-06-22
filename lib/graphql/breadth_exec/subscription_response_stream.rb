@@ -18,6 +18,7 @@ module GraphQL
         @source_stream = source_stream
       end
 
+      # @override
       #: () ?{ (graphql_result) -> void } -> Enumerator?
       def each(&block)
         return enum_for(:each) unless block

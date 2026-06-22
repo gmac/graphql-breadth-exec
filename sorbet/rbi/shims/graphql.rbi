@@ -105,6 +105,12 @@ module GraphQL
         def name; end
       end
 
+      class VariableDefinition < AbstractNode
+        def default_value; end
+        def name; end
+        def type; end
+      end
+
       class NullValue < AbstractNode; end
 
       class WrapperType < AbstractNode
@@ -120,6 +126,11 @@ module GraphQL
         def arguments; end
       end
 
+      class Argument < AbstractNode
+        def name; end
+        def value; end
+      end
+
       class Enum < AbstractNode
         def name; end
       end
@@ -127,6 +138,12 @@ module GraphQL
   end
 
   class Schema
+    def self.directives; end
+    def self.query; end
+    def self.lazy?(value); end
+    def self.sync_lazy(value); end
+    def self.type_error(error, context); end
+
     def directives; end
     def query; end
     def lazy?(value); end
@@ -134,6 +151,17 @@ module GraphQL
     def type_error(error, context); end
 
     class Member
+      def self.graphql_name; end
+      def self.kind; end
+      def self.unwrap; end
+      def self.list?; end
+      def self.non_null?; end
+      def self.of_type; end
+      def self.to_type_signature; end
+      def self.to_list_type; end
+      def self.to_non_null_type; end
+      def self.const_get(name); end
+
       def graphql_name; end
       def kind; end
       def unwrap; end
@@ -141,11 +169,21 @@ module GraphQL
       def non_null?; end
       def of_type; end
       def to_type_signature; end
+      def to_list_type; end
+      def to_non_null_type; end
       def const_get(name); end
     end
 
     class Object < Member
+      def self.introspection?; end
+
       def introspection?; end
+    end
+
+    class InputObject < Member
+      def self.directives; end
+
+      def directives; end
     end
 
     class Field
@@ -156,6 +194,14 @@ module GraphQL
       def type; end
       def path; end
       def introspection?; end
+    end
+
+    class Argument
+      def default_value; end
+      def default_value?; end
+      def graphql_name; end
+      def keyword; end
+      def type; end
     end
 
     class Directive

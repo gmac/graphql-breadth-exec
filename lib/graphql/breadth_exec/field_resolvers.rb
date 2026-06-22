@@ -3,34 +3,32 @@
 
 module GraphQL
   module BreadthExec
-    #: [ContextType < GraphQL::Query::Context]
     class FieldResolver
-      #: (Executor::ExecutionField[untyped], ContextType) -> void
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> void
       def plan(_exec_field, _ctx)
         nil
       end
 
-      #: (Executor::ExecutionField[untyped], ContextType) -> (Array[untyped] | ExecutionPromise)
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> (Array[untyped] | Executor::ExecutionPromise)
       def resolve(exec_field, ctx)
         raise NotImplementedError, "FieldResolver#resolve must be implemented."
       end
 
-      #: (Array[untyped] | ExecutionPromise) { (Array[untyped]) -> Array[untyped] } -> (Array[untyped] | ExecutionPromise)
-      def handle_resolved(result)
-        if result.is_a?(ExecutionPromise)
-          result.then { |values| yield(values) }
+      #: (Array[untyped] | Executor::ExecutionPromise) { (Array[untyped]) -> Array[untyped] } -> (Array[untyped] | Executor::ExecutionPromise)
+      def handle_resolved(result, &block)
+        if result.is_a?(Executor::ExecutionPromise)
+          result.then { |values| block.call(values) }
         else
-          yield(result)
+          block.call(result)
         end
       end
 
-      #: (Executor::ExecutionField[untyped], ContextType) -> Enumerable
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> Enumerable
       def subscribe(_exec_field, _ctx)
         raise NotImplementedError, "FieldResolver#subscribe must be implemented."
       end
     end
 
-    #: [ContextType = GraphQL::Query::Context]
     class HashKeyResolver < FieldResolver
       #: String | Symbol
       attr_reader :key
@@ -40,23 +38,22 @@ module GraphQL
         @key = key
       end
 
-      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> Array[untyped]
       def resolve(exec_field, _ctx)
         exec_field.map_objects { _1[@key] }
       end
     end
 
-    #: [ContextType = GraphQL::Query::Context]
     class MethodResolver < FieldResolver
       #: type method_name = String | Symbol
 
-      #: (method_name, *method_name, ?fallback: untyped) -> void
+      #: (*method_name, ?fallback: untyped) -> void
       def initialize(*names, fallback: nil)
         @names = names
         @fallback = fallback
       end
 
-      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> Array[untyped]
       def resolve(exec_field, _ctx)
         exec_field.map_objects do |obj|
           @names.reduce(obj) do |memo, name|
@@ -69,15 +66,13 @@ module GraphQL
       end
     end
 
-    #: [ContextType = GraphQL::Query::Context]
     class SelfResolver < FieldResolver
-      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> Array[untyped]
       def resolve(exec_field, _ctx)
         exec_field.map_objects(&:itself)
       end
     end
 
-    #: [ContextType = GraphQL::Query::Context]
     class ValueResolver < FieldResolver
       #: untyped
       attr_reader :value
@@ -87,7 +82,7 @@ module GraphQL
         @value = value
       end
 
-      #: (Executor::ExecutionField[untyped], ContextType) -> Array[untyped]
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context) -> Array[untyped]
       def resolve(exec_field, _ctx)
         exec_field.resolve_all(@value)
       end

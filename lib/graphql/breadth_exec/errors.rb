@@ -6,7 +6,6 @@ require "graphql"
 module GraphQL
   module BreadthExec
     class Error < StandardError; end
-    class DocumentError < Error; end
     class ImplementationError < Error; end
     class MethodNotImplementedError < Error; end
 

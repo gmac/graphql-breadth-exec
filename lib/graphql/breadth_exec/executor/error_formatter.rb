@@ -108,9 +108,6 @@ module GraphQL::BreadthExec
 
             result = propagate_object_scope_errors(raw_object, fragment_type, fragment.selections, state)
             return nil if result.nil?
-
-          else
-            raise DocumentError.new("Invalid selection node type")
           end
         end
 
