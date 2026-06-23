@@ -3,7 +3,7 @@
 require "debug"
 require "graphql"
 require "graphql/batch"
-require "graphql/breadth_exec"
+require "graphql/breadth"
 
 require "benchmark/ips"
 require "memory_profiler"
@@ -28,7 +28,7 @@ class GraphQLBenchmark
 
   DOCUMENT = GraphQL.parse(BASIC_DOCUMENT)
   CARDINAL_SCHEMA = SCHEMA
-  CARDINAL_TRACER = GraphQL::BreadthExec::Tracer.new
+  CARDINAL_TRACER = GraphQL::Breadth::Tracer.new
   RESOLVE_BATCH_OBJECT_COUNT = 1_000
   RESOLVE_BATCH_DOCUMENT = GraphQL.parse(%|{
     widgets {
@@ -67,18 +67,18 @@ class GraphQLBenchmark
 
   RESOLVE_BATCH_RESOLVERS = {
     "Widget" => {
-      "id" => GraphQL::BreadthExec::HashKeyResolver.new("id"),
-      "title" => GraphQL::BreadthExec::HashKeyResolver.new("title"),
-      "score" => GraphQL::BreadthExec::HashKeyResolver.new("score"),
+      "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
+      "title" => GraphQL::Breadth::HashKeyResolver.new("title"),
+      "score" => GraphQL::Breadth::HashKeyResolver.new("score"),
     },
     "Query" => {
-      "widgets" => GraphQL::BreadthExec::HashKeyResolver.new("widgets"),
+      "widgets" => GraphQL::Breadth::HashKeyResolver.new("widgets"),
     },
   }.freeze
 
   RESOLVE_BATCH_BREADTH_SCHEMA = GraphQL::Schema.from_definition(RESOLVE_BATCH_SDL)
 
-  class NoopBreadthLazyLoader < GraphQL::BreadthExec::LazyLoader
+  class NoopBreadthLazyLoader < GraphQL::Breadth::LazyLoader
     def map?
       true
     end
@@ -88,7 +88,7 @@ class GraphQLBenchmark
     end
   end
 
-  class LazyHashKeyResolver < GraphQL::BreadthExec::FieldResolver
+  class LazyHashKeyResolver < GraphQL::Breadth::FieldResolver
     def initialize(key)
       @key = key
     end
@@ -108,7 +108,7 @@ class GraphQLBenchmark
       "score" => LazyHashKeyResolver.new("score"),
     },
     "Query" => {
-      "widgets" => GraphQL::BreadthExec::HashKeyResolver.new("widgets"),
+      "widgets" => GraphQL::Breadth::HashKeyResolver.new("widgets"),
     },
   }.freeze
 
@@ -357,7 +357,7 @@ class GraphQLBenchmark
           end
 
           x.report("graphql-cardinal #{num_objects} resolvers") do
-            GraphQL::BreadthExec::Executor.new(
+            GraphQL::Breadth::Executor.new(
               SCHEMA,
               DOCUMENT,
               resolvers: BREADTH_RESOLVERS,
@@ -390,7 +390,7 @@ class GraphQLBenchmark
           end
 
           x.report("graphql-cardinal: #{num_objects} lazy resolvers") do
-            GraphQL::BreadthExec::Executor.new(
+            GraphQL::Breadth::Executor.new(
               SCHEMA,
               DOCUMENT,
               resolvers: BREADTH_DEFERRED_RESOLVERS,
@@ -413,7 +413,7 @@ class GraphQLBenchmark
         end
 
         x.report("graphql-cardinal introspection") do
-          GraphQL::BreadthExec::Executor.new(
+          GraphQL::Breadth::Executor.new(
             SCHEMA,
             document,
             resolvers: BREADTH_RESOLVERS,
@@ -444,8 +444,8 @@ class GraphQLBenchmark
           warn "Skipping graphql-ruby resolve_batch: GraphQL::Execution::Next#execute_next is not available in graphql #{GraphQL::VERSION}."
         end
 
-        x.report("graphql-breadth_exec: #{RESOLVE_BATCH_OBJECT_COUNT} x 3 scalars") do
-          GraphQL::BreadthExec::Executor.new(
+        x.report("graphql-breadth: #{RESOLVE_BATCH_OBJECT_COUNT} x 3 scalars") do
+          GraphQL::Breadth::Executor.new(
             RESOLVE_BATCH_BREADTH_SCHEMA,
             RESOLVE_BATCH_DOCUMENT,
             resolvers: RESOLVE_BATCH_RESOLVERS,
@@ -464,8 +464,8 @@ class GraphQLBenchmark
       Benchmark.ips do |x|
         x.config(time: iterations, warmup: 1)
 
-        x.report("graphql-breadth_exec lazy: #{RESOLVE_BATCH_OBJECT_COUNT} x 3 scalars") do
-          GraphQL::BreadthExec::Executor.new(
+        x.report("graphql-breadth lazy: #{RESOLVE_BATCH_OBJECT_COUNT} x 3 scalars") do
+          GraphQL::Breadth::Executor.new(
             RESOLVE_BATCH_BREADTH_SCHEMA,
             RESOLVE_BATCH_DOCUMENT,
             resolvers: LAZY_SCALAR_BREADTH_RESOLVERS,
@@ -516,8 +516,8 @@ class GraphQLBenchmark
           execute_graphql_ruby(LazyScalarDataloaderSchema, document: LAZY_FIELD_BATCH_DOCUMENT, root_value: RESOLVE_BATCH_DATA)
         end
 
-        x.report("graphql-breadth_exec LazyLoader: #{RESOLVE_BATCH_OBJECT_COUNT} x 1 lazy scalar") do
-          GraphQL::BreadthExec::Executor.new(
+        x.report("graphql-breadth LazyLoader: #{RESOLVE_BATCH_OBJECT_COUNT} x 1 lazy scalar") do
+          GraphQL::Breadth::Executor.new(
             RESOLVE_BATCH_BREADTH_SCHEMA,
             LAZY_FIELD_BATCH_DOCUMENT,
             resolvers: LAZY_SCALAR_BREADTH_RESOLVERS,
@@ -546,7 +546,7 @@ class GraphQLBenchmark
 
       with_data_sizes(sizes) do |data_source, num_objects|
         report = MemoryProfiler.report do
-          GraphQL::BreadthExec::Executor.new(
+          GraphQL::Breadth::Executor.new(
             SCHEMA,
             DOCUMENT,
             resolvers: BREADTH_RESOLVERS,

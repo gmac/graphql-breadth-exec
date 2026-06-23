@@ -43,7 +43,7 @@ namespace :benchmark do
     GraphQLBenchmark.benchmark_introspection
   end
 
-  desc "Benchmark GraphQL Ruby resolve_batch against breadth_exec"
+  desc "Benchmark GraphQL Ruby resolve_batch against breadth"
   task :resolve_batch do
     prepare_benchmark
     GraphQLBenchmark.benchmark_resolve_batch

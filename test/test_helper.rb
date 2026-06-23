@@ -14,13 +14,13 @@ require 'minitest/pride'
 require 'minitest/autorun'
 require 'minitest/stub_const'
 
-require 'graphql/breadth_exec'
+require 'graphql/breadth'
 require 'graphql/batch'
 require_relative './fixtures'
 require_relative './star_wars_fixtures'
 
-def breadth_exec(query, source, variables: {}, context: {}, tracers: [GraphQL::BreadthExec::Tracer.new])
-  GraphQL::BreadthExec::Executor.new(
+def breadth(query, source, variables: {}, context: {}, tracers: [GraphQL::Breadth::Tracer.new])
+  GraphQL::Breadth::Executor.new(
     SCHEMA,
     GraphQL.parse(query),
     resolvers: BREADTH_RESOLVERS,
@@ -32,10 +32,10 @@ def breadth_exec(query, source, variables: {}, context: {}, tracers: [GraphQL::B
 end
 
 def assert_error_reported(expected_class, &block)
-  original_handler = GraphQL::BreadthExec.on_report_error
+  original_handler = GraphQL::Breadth.on_report_error
   reported_error = nil
 
-  GraphQL::BreadthExec.on_report_error = ->(error) do
+  GraphQL::Breadth.on_report_error = ->(error) do
     reported_error = error
   end
 
@@ -47,5 +47,5 @@ def assert_error_reported(expected_class, &block)
   assert_equal(expected_class, reported_error.class)
   reported_error
 ensure
-  GraphQL::BreadthExec.on_report_error = original_handler
+  GraphQL::Breadth.on_report_error = original_handler
 end

@@ -101,7 +101,7 @@ STAR_WARS_DATA = {
   },
 }.freeze
 
-class StarWarsFriendsResolver < GraphQL::BreadthExec::FieldResolver
+class StarWarsFriendsResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, _ctx)
     exec_field.map_objects do |character|
       character["friends"].map { |id| STAR_WARS_DATA[id] }
@@ -109,17 +109,17 @@ class StarWarsFriendsResolver < GraphQL::BreadthExec::FieldResolver
   end
 end
 
-class StarWarsSecretBackstoryResolver < GraphQL::BreadthExec::FieldResolver
+class StarWarsSecretBackstoryResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, _ctx)
     exec_field.map_objects_with_index do |_character, index|
       path = exec_field.path.dup
       path.insert(-2, index) if exec_field.objects.length > 1
-      GraphQL::BreadthExec::ExecutionError.new("secretBackstory is secret.", path: path, exec_field: exec_field)
+      GraphQL::Breadth::ExecutionError.new("secretBackstory is secret.", path: path, exec_field: exec_field)
     end
   end
 end
 
-class StarWarsHeroResolver < GraphQL::BreadthExec::FieldResolver
+class StarWarsHeroResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, _ctx)
     exec_field.map_objects do
       exec_field.arguments[:episode] == "EMPIRE" ? STAR_WARS_DATA["1000"] : STAR_WARS_DATA["2001"]
@@ -127,7 +127,7 @@ class StarWarsHeroResolver < GraphQL::BreadthExec::FieldResolver
   end
 end
 
-class StarWarsHumanResolver < GraphQL::BreadthExec::FieldResolver
+class StarWarsHumanResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, _ctx)
     exec_field.map_objects do
       character = STAR_WARS_DATA[exec_field.arguments[:id]]
@@ -136,7 +136,7 @@ class StarWarsHumanResolver < GraphQL::BreadthExec::FieldResolver
   end
 end
 
-class StarWarsDroidResolver < GraphQL::BreadthExec::FieldResolver
+class StarWarsDroidResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, _ctx)
     exec_field.map_objects do
       character = STAR_WARS_DATA[exec_field.arguments[:id]]
@@ -146,10 +146,10 @@ class StarWarsDroidResolver < GraphQL::BreadthExec::FieldResolver
 end
 
 STAR_WARS_CHARACTER_RESOLVERS = {
-  "id" => GraphQL::BreadthExec::HashKeyResolver.new("id"),
-  "name" => GraphQL::BreadthExec::HashKeyResolver.new("name"),
+  "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
+  "name" => GraphQL::Breadth::HashKeyResolver.new("name"),
   "friends" => StarWarsFriendsResolver.new,
-  "appearsIn" => GraphQL::BreadthExec::HashKeyResolver.new("appearsIn"),
+  "appearsIn" => GraphQL::Breadth::HashKeyResolver.new("appearsIn"),
   "secretBackstory" => StarWarsSecretBackstoryResolver.new,
 }.freeze
 
@@ -162,11 +162,11 @@ STAR_WARS_RESOLVERS = {
   },
   "Human" => {
     **STAR_WARS_CHARACTER_RESOLVERS,
-    "homePlanet" => GraphQL::BreadthExec::HashKeyResolver.new("homePlanet"),
+    "homePlanet" => GraphQL::Breadth::HashKeyResolver.new("homePlanet"),
   },
   "Droid" => {
     **STAR_WARS_CHARACTER_RESOLVERS,
-    "primaryFunction" => GraphQL::BreadthExec::HashKeyResolver.new("primaryFunction"),
+    "primaryFunction" => GraphQL::Breadth::HashKeyResolver.new("primaryFunction"),
   },
   "Query" => {
     "hero" => StarWarsHeroResolver.new,
@@ -176,7 +176,7 @@ STAR_WARS_RESOLVERS = {
 }.freeze
 
 def execute_star_wars(query, variables: {})
-  GraphQL::BreadthExec::Executor.new(
+  GraphQL::Breadth::Executor.new(
     STAR_WARS_SCHEMA,
     GraphQL.parse(query),
     resolvers: STAR_WARS_RESOLVERS,
