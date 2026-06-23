@@ -55,6 +55,32 @@ module GraphQL
           operation.directives.map { |node| build_execution_directive(node, depth: 0) }
         end
 
+        #: (ExecutionField[untyped]) -> Incremental::StreamUsage?
+        def stream_usage_for(exec_field)
+          return nil unless @executor.incremental?
+
+          node = exec_field.nodes.first #: as !nil
+          return nil if node.directives.empty?
+
+          directive = node.directives.find { _1.name == "stream" }
+          return nil unless directive
+
+          condition = directive.arguments.find { _1.name == "if" }
+          return nil if condition && argument_value(condition) == false
+
+          initial_count_arg = directive.arguments.find { _1.name == "initialCount" }
+          initial_count = initial_count_arg ? argument_value(initial_count_arg) : 0
+          unless initial_count.is_a?(Integer) && initial_count >= 0
+            raise ExecutionError.new("initialCount must be a positive integer", exec_field:)
+          end
+
+          label_arg = directive.arguments.find { _1.name == "label" }
+          label = label_arg ? argument_value(label_arg) : nil
+          label = nil unless label.is_a?(String)
+
+          Incremental::StreamUsage.new(label, initial_count:)
+        end
+
         #: (
         #|   GraphQL::Language::Nodes::OperationDefinition,
         #|   root_object: untyped,
@@ -268,6 +294,8 @@ module GraphQL
           selections_by_key = if exec_scope.is_a?(Incremental::DeferredExecutionScope)
             parent_usages = exec_scope.defer_usages
             exec_scope.field_selections
+          elsif exec_scope.is_a?(Incremental::StreamExecutionScope)
+            incremental_selections_grouped_by_key(exec_scope.parent_type, exec_scope.selections)
           elsif (parent_field = exec_scope.parent_field)
             map = Hash.new { |h, k| h[k] = [] }
             parent_incremental_selections = parent_field.incremental_selections #: as !nil

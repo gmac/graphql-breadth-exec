@@ -29,11 +29,16 @@ module GraphQL
 
         #: (Executor::ExecutionScope, Integer) -> error_path
         def object_path(exec_scope, index)
-          current_path = []
+          current_path = [] #: error_path
 
           current_scope = exec_scope #: Executor::ExecutionScope?
           breadth_index = index
           while current_scope
+            if current_scope.is_a?(Incremental::StreamExecutionScope)
+              current_scope.stream_item_path(breadth_index).reverse_each { current_path.prepend(_1) }
+              break
+            end
+
             # index the scope unless it has already been done
             scope_indices = @indices_by_scope[current_scope]
             index_scope(current_scope, scope_indices) if scope_indices.empty?

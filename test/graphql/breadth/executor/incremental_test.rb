@@ -913,6 +913,143 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     )
   end
 
+  def test_incremental_result_streams_list_field
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) {
+          id
+          title
+        }
+      }
+    }|).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{ "id" => "gid://shopify/Product/1", "title" => "Banana" }],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Product/2", "title" => "Apple" }],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_streams_with_default_initial_count
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream {
+          id
+        }
+      }
+    }|).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [
+            { "id" => "gid://shopify/Product/1" },
+            { "id" => "gid://shopify/Product/2" },
+          ],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_includes_stream_label
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1, label: "ProductNodes") {
+          id
+        }
+      }
+    }|).incremental_result
+
+    assert_equal(
+      [{ "id" => "0", "path" => ["products", "nodes"], "label" => "ProductNodes" }],
+      result.initial_result.fetch("pending"),
+    )
+  end
+
+  def test_incremental_result_does_not_stream_when_if_is_false
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 0, if: false) {
+          id
+        }
+      }
+    }|).incremental_result
+
+    expected = {
+      "data" => {
+        "products" => {
+          "nodes" => [
+            { "id" => "gid://shopify/Product/1" },
+            { "id" => "gid://shopify/Product/2" },
+          ],
+        },
+      },
+    }
+
+    refute result.incremental?
+    assert_equal expected, result.initial_result
+    assert_equal [], result.subsequent_results.to_a
+  end
+
+  def test_ready_stream_executions_batch_lazy_work
+    resolvers = BREADTH_RESOLVERS.merge(
+      "Product" => BREADTH_RESOLVERS.fetch("Product").merge(
+        "title" => LazyHashResolver.new("title"),
+      ),
+    )
+
+    BatchTrackingLoader.perform_keys = []
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream {
+          title
+        }
+      }
+    }|, resolvers:).incremental_result
+
+    result.subsequent_results.to_a
+
+    assert_equal(
+      [["Banana", "Apple"]],
+      BatchTrackingLoader.perform_keys,
+    )
+  end
+
   private
 
   def build_executor(document, source: SOURCE, resolvers: BREADTH_RESOLVERS)

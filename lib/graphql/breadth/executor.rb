@@ -676,6 +676,7 @@ module GraphQL
         field_key = exec_field.key
         field_type = exec_field.type
         return_type = field_type.unwrap
+        stream_usage = active_stream_usage_for(exec_field, field_type)
 
         if resolved_objects.length != parent_objects.length
           handle_or_reraise(ResultCountMismatchError.new(
@@ -693,7 +694,11 @@ module GraphQL
           i = 0
           while i < resolved_objects.length
             object = resolved_objects[i]
-            parent_results[i][field_key] = build_and_flatmap_composite_result(exec_field, field_type, object, next_objects, next_results)
+            parent_results[i][field_key] = if stream_usage
+              build_streaming_composite_result(exec_field, field_type, object, next_objects, next_results, stream_usage, i)
+            else
+              build_and_flatmap_composite_result(exec_field, field_type, object, next_objects, next_results)
+            end
             i += 1
           end
 
@@ -712,7 +717,11 @@ module GraphQL
           i = 0
           while i < resolved_objects.length
             val = resolved_objects[i]
-            parent_results[i][field_key] = build_leaf_result(exec_field, field_type, val)
+            parent_results[i][field_key] = if stream_usage
+              build_streaming_leaf_result(exec_field, field_type, val, stream_usage, i)
+            else
+              build_leaf_result(exec_field, field_type, val)
+            end
             i += 1
           end
         end
@@ -725,6 +734,150 @@ module GraphQL
           duration = timer(start_time)
           @tracers.each { _1.after_build_field_result(exec_field, @context, duration:) }
         end
+      end
+
+      #: (ExecutionField[untyped], singleton(GraphQL::Schema::Member)) -> Incremental::StreamUsage?
+      def active_stream_usage_for(exec_field, field_type)
+        return nil unless incremental?
+        return nil unless Util.unwrap_non_null(field_type).list?
+
+        @planner.stream_usage_for(exec_field)
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   untyped current_type,
+      #|   untyped object,
+      #|   Array[untyped] next_objects,
+      #|   Array[Hash[String, untyped]] next_results,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #| ) -> untyped
+      def build_streaming_composite_result(exec_field, current_type, object, next_objects, next_results, stream_usage, object_index)
+        return build_and_flatmap_composite_result(exec_field, current_type, object, next_objects, next_results) if object.nil? || object.is_a?(StandardError)
+        return build_and_flatmap_composite_result(exec_field, current_type, object, next_objects, next_results) unless Util.unwrap_non_null(current_type).list?
+
+        objects = list_items_for_stream(exec_field, object)
+        initial_count = stream_usage.initial_count
+        item_type = Util.unwrap_non_null(current_type).of_type
+
+        initial_items = objects.take(initial_count)
+        initial_result = initial_items.map do |src|
+          build_and_flatmap_composite_result(exec_field, item_type, src, next_objects, next_results)
+        end
+
+        register_composite_stream_scope(exec_field, item_type, stream_usage, object_index, objects.drop(initial_count), initial_count) if initial_count <= objects.length
+
+        initial_result
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   untyped current_type,
+      #|   untyped val,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #| ) -> untyped
+      def build_streaming_leaf_result(exec_field, current_type, val, stream_usage, object_index)
+        return build_leaf_result(exec_field, current_type, val) if val.nil? || val.is_a?(StandardError)
+        return build_leaf_result(exec_field, current_type, val) unless Util.unwrap_non_null(current_type).list?
+
+        values = list_items_for_stream(exec_field, val)
+        initial_count = stream_usage.initial_count
+        item_type = Util.unwrap_non_null(current_type).of_type
+
+        initial_result = values.take(initial_count).map { build_leaf_result(exec_field, item_type, _1) }
+        if initial_count <= values.length
+          stream_items = values.drop(initial_count).map { build_leaf_result(exec_field, item_type, _1) }
+          register_stream_scope(
+            exec_field,
+            exec_field.scope.parent_type,
+            EMPTY_ARRAY,
+            EMPTY_ARRAY,
+            EMPTY_ARRAY,
+            stream_items,
+            EMPTY_ARRAY,
+            stream_usage,
+            object_index,
+            initial_count,
+          )
+        end
+
+        initial_result
+      end
+
+      #: (ExecutionField[untyped], untyped) -> Array[untyped]
+      def list_items_for_stream(exec_field, value)
+        return value if value.is_a?(Array)
+        return value.to_a if value.is_a?(Enumerable)
+
+        raise InvalidListResultError.new(exec_field:, result_type: value.class)
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   untyped item_type,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #|   Array[untyped] tail_objects,
+      #|   Integer initial_count,
+      #| ) -> void
+      def register_composite_stream_scope(exec_field, item_type, stream_usage, object_index, tail_objects, initial_count)
+        stream_items = []
+        stream_objects = []
+        stream_results = []
+        object_paths = []
+        stream_path = exec_field.object_path(object_index)
+
+        tail_objects.each_with_index do |src, index|
+          before_results = stream_results.length
+          stream_items << build_and_flatmap_composite_result(exec_field, item_type, src, stream_objects, stream_results)
+          while before_results < stream_results.length
+            object_paths[before_results] = [*stream_path, initial_count + index]
+            before_results += 1
+          end
+        end
+
+        register_stream_scope(
+          exec_field,
+          item_type.unwrap,
+          exec_field.selections,
+          stream_objects,
+          stream_results,
+          stream_items,
+          object_paths,
+          stream_usage,
+          object_index,
+          initial_count,
+        )
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   singleton(GraphQL::Schema::Object) parent_type,
+      #|   Array[selection_node] selections,
+      #|   Array[untyped] objects,
+      #|   Array[untyped] results,
+      #|   Array[untyped] items,
+      #|   Array[error_path] object_paths,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #|   Integer initial_count,
+      #| ) -> void
+      def register_stream_scope(exec_field, parent_type, selections, objects, results, items, object_paths, stream_usage, object_index, initial_count)
+        stream_path = exec_field.object_path(object_index)
+        stream_delivery = Incremental::StreamDelivery.new(stream_path, stream_usage.label)
+        @incremental.register_stream_scope(Incremental::StreamExecutionScope.new(
+          parent_field: exec_field,
+          parent_type:,
+          selections:,
+          objects:,
+          results:,
+          items:,
+          object_paths:,
+          delivery: stream_delivery,
+          initial_index: initial_count,
+        ))
       end
 
       #: (
@@ -997,24 +1150,31 @@ module GraphQL
           break if ready_scopes.empty?
 
           initial_error_count = @invalidated_results.size
-          run!(@planner.plan_scopes(ready_scopes))
+          scopes_to_execute = ready_scopes.reject { _1.is_a?(Incremental::StreamExecutionScope) && _1.objects.empty? }
+          run!(@planner.plan_scopes(scopes_to_execute)) unless scopes_to_execute.empty?
           has_errors = @invalidated_results.size > initial_error_count
 
           ready_scopes.each do |exec_scope|
-            deliveries = @incremental.deliveries_for(exec_scope)
-            deliveries.each do |index, path, deferred_deliveries|
-              data = exec_scope.results[index]
-              errors = EMPTY_ARRAY
-              if has_errors
-                data, errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
-              end
+            if exec_scope.is_a?(Incremental::StreamExecutionScope)
+              items, stream_errors = stream_items_for(exec_scope)
+              incremental_payloads << @incremental.stream_payload(exec_scope.delivery, items, errors: stream_errors) unless items.empty?
+              completed_deliveries << exec_scope.delivery
+            else
+              deliveries = @incremental.deliveries_for(exec_scope)
+              deliveries.each do |index, path, deferred_deliveries|
+                data = exec_scope.results[index]
+                deferred_errors = EMPTY_ARRAY
+                if has_errors
+                  data, deferred_errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
+                end
 
-              if data.nil? && !errors.empty?
-                deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(errors) }
-              else
-                incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors:)
+                if data.nil? && !deferred_errors.empty?
+                  deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(deferred_errors) }
+                else
+                  incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors: deferred_errors)
+                end
+                completed_deliveries.concat(deferred_deliveries)
               end
-              completed_deliveries.concat(deferred_deliveries)
             end
 
             exec_scope.executed = true
@@ -1028,6 +1188,38 @@ module GraphQL
         payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
         payload["completed"] = completed_payloads unless completed_payloads.empty?
         yielder << payload
+      end
+
+      #: (Incremental::StreamExecutionScope) -> [Array[untyped], Array[error_hash]]
+      def stream_items_for(exec_scope)
+        items = []
+        errors = []
+
+        exec_scope.items.each_with_index do |item, index|
+          path = exec_scope.item_path(index)
+          if (err = @invalidated_results[item])
+            append_stream_item_errors(err, errors, path)
+            items << nil
+          elsif !exec_scope.selections.empty?
+            data, item_errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, item, path)
+            errors.concat(item_errors)
+            items << data
+          else
+            items << item
+          end
+        end
+
+        [items, errors]
+      end
+
+      #: (ExecutionError, Array[error_hash], error_path) -> void
+      def append_stream_item_errors(error, errors, path)
+        error.each do |err|
+          next if err.equal?(UNREPORTED_ERROR)
+
+          errors << err.to_h.tap { _1["path"] = path }
+          @context.errors << err.cause if err.cause
+        end
       end
 
       #: (?data: Util::NilLike | graphql_result | nil, ?errors: Array[error_hash]) -> graphql_result
