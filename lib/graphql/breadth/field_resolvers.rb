@@ -14,6 +14,11 @@ module GraphQL
         raise NotImplementedError, "FieldResolver#resolve must be implemented."
       end
 
+      #: (Executor::ExecutionField[untyped], GraphQL::Query::Context, initial_count: Integer) -> (Array[untyped] | Executor::ExecutionPromise)
+      def resolve_stream(exec_field, ctx, initial_count:)
+        resolve(exec_field, ctx)
+      end
+
       #: (Array[untyped] | Executor::ExecutionPromise) { (Array[untyped]) -> Array[untyped] } -> (Array[untyped] | Executor::ExecutionPromise)
       def handle_resolved(result, &block)
         if result.is_a?(Executor::ExecutionPromise)

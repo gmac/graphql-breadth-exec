@@ -619,15 +619,16 @@ module GraphQL
           exec_field.validate!
           pre_authorized = @authorization.authorized_field?(exec_field, @context)
           pre_authorized &&= @authorization.authorized_type?(exec_field.type.unwrap, @context, exec_field: exec_field)
+          stream_usage = pre_authorized ? active_stream_usage_for(exec_field, exec_field.type) : nil
 
           # each branch must assign `exec_field.result` to make it available in the final ensure block
           if !pre_authorized
             exec_field.result = exec_field.resolve_all(FieldAuthorizationError.new(exec_field: exec_field))
           elsif exec_field.directives.empty?
-            exec_field.result = exec_field.resolver.resolve(exec_field, @context)
+            exec_field.result = resolve_field(exec_field, stream_usage)
           else
             execute_with_directives(exec_field.directives, current_field: exec_field) do
-              exec_field.result = exec_field.resolver.resolve(exec_field, @context)
+              exec_field.result = resolve_field(exec_field, stream_usage)
             end
           end
         rescue StandardError => e
@@ -646,6 +647,15 @@ module GraphQL
           build_field_placeholder(exec_field)
         else
           build_field_result(exec_field, exec_field.result)
+        end
+      end
+
+      #: (ExecutionField[untyped], Incremental::StreamUsage?) -> (Array[untyped] | ExecutionPromise)
+      def resolve_field(exec_field, stream_usage)
+        if stream_usage
+          exec_field.resolver.resolve_stream(exec_field, @context, initial_count: stream_usage.initial_count)
+        else
+          exec_field.resolver.resolve(exec_field, @context)
         end
       end
 
@@ -757,16 +767,24 @@ module GraphQL
         return build_and_flatmap_composite_result(exec_field, current_type, object, next_objects, next_results) if object.nil? || object.is_a?(StandardError)
         return build_and_flatmap_composite_result(exec_field, current_type, object, next_objects, next_results) unless Util.unwrap_non_null(current_type).list?
 
-        objects = list_items_for_stream(exec_field, object)
         initial_count = stream_usage.initial_count
         item_type = Util.unwrap_non_null(current_type).of_type
+        initial_items, remaining_items, register_stream = split_stream_items(exec_field, object, initial_count)
 
-        initial_items = objects.take(initial_count)
         initial_result = initial_items.map do |src|
           build_and_flatmap_composite_result(exec_field, item_type, src, next_objects, next_results)
         end
 
-        register_composite_stream_scope(exec_field, item_type, stream_usage, object_index, objects.drop(initial_count), initial_count) if initial_count <= objects.length
+        if register_stream
+          register_composite_stream_scope(
+            exec_field,
+            item_type,
+            stream_usage,
+            object_index,
+            remaining_items,
+            initial_items.length,
+          )
+        end
 
         initial_result
       end
@@ -782,36 +800,72 @@ module GraphQL
         return build_leaf_result(exec_field, current_type, val) if val.nil? || val.is_a?(StandardError)
         return build_leaf_result(exec_field, current_type, val) unless Util.unwrap_non_null(current_type).list?
 
-        values = list_items_for_stream(exec_field, val)
         initial_count = stream_usage.initial_count
         item_type = Util.unwrap_non_null(current_type).of_type
+        initial_items, remaining_items, register_stream = split_stream_items(exec_field, val, initial_count)
 
-        initial_result = values.take(initial_count).map { build_leaf_result(exec_field, item_type, _1) }
-        if initial_count <= values.length
-          stream_items = values.drop(initial_count).map { build_leaf_result(exec_field, item_type, _1) }
+        initial_result = initial_items.map { build_leaf_result(exec_field, item_type, _1) }
+        if register_stream
           register_stream_scope(
             exec_field,
             exec_field.scope.parent_type,
             EMPTY_ARRAY,
-            EMPTY_ARRAY,
-            EMPTY_ARRAY,
-            stream_items,
-            EMPTY_ARRAY,
+            [],
+            [],
+            [],
+            [],
             stream_usage,
             object_index,
-            initial_count,
+            initial_items.length,
+            prepare: ->(stream_scope) { prepare_leaf_stream_scope(stream_scope, exec_field, item_type, remaining_items) },
           )
         end
 
         initial_result
       end
 
-      #: (ExecutionField[untyped], untyped) -> Array[untyped]
-      def list_items_for_stream(exec_field, value)
-        return value if value.is_a?(Array)
-        return value.to_a if value.is_a?(Enumerable)
+      #: (ExecutionField[untyped], untyped, Integer) -> [Array[untyped], untyped, bool]
+      def split_stream_items(exec_field, value, initial_count)
+        case value
+        when StreamSource
+          initial_items = value.initial_items
+          remaining_items = value.remaining_items
+          return [initial_items, remaining_items, !remaining_items.nil?]
+        when Array
+          return [value.take(initial_count), value.drop(initial_count), initial_count <= value.length]
+        when Enumerable
+          initial_items = []
+          iterator = value.each #: as Enumerator
+          while initial_items.length < initial_count
+            begin
+              initial_items << iterator.next
+            rescue StopIteration
+              return [initial_items, iterator, false]
+            end
+          end
+          return [initial_items, iterator, true]
+        end
 
         raise InvalidListResultError.new(exec_field:, result_type: value.class)
+      end
+
+      #: (ExecutionField[untyped], untyped) { (untyped, Integer) -> void } -> void
+      def each_stream_item(exec_field, items, &block)
+        if items.is_a?(Array)
+          items.each_with_index { |item, index| yield item, index }
+        elsif items.respond_to?(:next)
+          index = 0
+          loop do
+            yield items.next, index
+            index += 1
+          end
+        elsif items.is_a?(Enumerable)
+          items.each_with_index { |item, index| yield item, index }
+        else
+          raise InvalidListResultError.new(exec_field:, result_type: items.class)
+        end
+      rescue StopIteration
+        nil
       end
 
       #: (
@@ -819,24 +873,15 @@ module GraphQL
       #|   untyped item_type,
       #|   Incremental::StreamUsage stream_usage,
       #|   Integer object_index,
-      #|   Array[untyped] tail_objects,
+      #|   untyped remaining_items,
       #|   Integer initial_count,
       #| ) -> void
-      def register_composite_stream_scope(exec_field, item_type, stream_usage, object_index, tail_objects, initial_count)
+      def register_composite_stream_scope(exec_field, item_type, stream_usage, object_index, remaining_items, initial_count)
         stream_items = []
         stream_objects = []
         stream_results = []
         object_paths = []
         stream_path = exec_field.object_path(object_index)
-
-        tail_objects.each_with_index do |src, index|
-          before_results = stream_results.length
-          stream_items << build_and_flatmap_composite_result(exec_field, item_type, src, stream_objects, stream_results)
-          while before_results < stream_results.length
-            object_paths[before_results] = [*stream_path, initial_count + index]
-            before_results += 1
-          end
-        end
 
         register_stream_scope(
           exec_field,
@@ -849,7 +894,24 @@ module GraphQL
           stream_usage,
           object_index,
           initial_count,
+          prepare: ->(stream_scope) do
+            each_stream_item(exec_field, remaining_items) do |src, index|
+              before_results = stream_results.length
+              stream_items << build_and_flatmap_composite_result(exec_field, item_type, src, stream_objects, stream_results)
+              while before_results < stream_results.length
+                object_paths[before_results] = [*stream_path, initial_count + index]
+                before_results += 1
+              end
+            end
+          end,
         )
+      end
+
+      #: (Incremental::StreamExecutionScope, ExecutionField[untyped], untyped, untyped) -> void
+      def prepare_leaf_stream_scope(stream_scope, exec_field, item_type, remaining_items)
+        each_stream_item(exec_field, remaining_items) do |val, _index|
+          stream_scope.items << build_leaf_result(exec_field, item_type, val)
+        end
       end
 
       #: (
@@ -863,8 +925,9 @@ module GraphQL
       #|   Incremental::StreamUsage stream_usage,
       #|   Integer object_index,
       #|   Integer initial_count,
+      #|   ?prepare: Proc?,
       #| ) -> void
-      def register_stream_scope(exec_field, parent_type, selections, objects, results, items, object_paths, stream_usage, object_index, initial_count)
+      def register_stream_scope(exec_field, parent_type, selections, objects, results, items, object_paths, stream_usage, object_index, initial_count, prepare: nil)
         stream_path = exec_field.object_path(object_index)
         stream_delivery = Incremental::StreamDelivery.new(stream_path, stream_usage.label)
         @incremental.register_stream_scope(Incremental::StreamExecutionScope.new(
@@ -877,6 +940,7 @@ module GraphQL
           object_paths:,
           delivery: stream_delivery,
           initial_index: initial_count,
+          prepare:,
         ))
       end
 

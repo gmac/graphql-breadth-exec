@@ -17,6 +17,9 @@ module GraphQL
         #: bool
         attr_writer :announced
 
+        #: bool
+        attr_reader :prepared
+
         #: (
         #|   parent_field: Executor::ExecutionField[untyped],
         #|   parent_type: singleton(GraphQL::Schema::Object),
@@ -27,12 +30,15 @@ module GraphQL
         #|   object_paths: Array[error_path],
         #|   delivery: StreamDelivery,
         #|   initial_index: Integer,
+        #|   ?prepare: Proc?,
         #| ) -> void
-        def initialize(parent_field:, parent_type:, selections:, objects:, results:, items:, object_paths:, delivery:, initial_index:)
+        def initialize(parent_field:, parent_type:, selections:, objects:, results:, items:, object_paths:, delivery:, initial_index:, prepare: nil)
           @delivery = delivery
           @items = items
           @object_paths = object_paths
           @initial_index = initial_index
+          @prepare = prepare
+          @prepared = false
           @announced = false
 
           super(
@@ -59,6 +65,11 @@ module GraphQL
 
         #: -> StreamExecutionScope
         def prepare!
+          unless @prepared
+            @prepare&.call(self)
+            @prepared = true
+          end
+
           self
         end
 

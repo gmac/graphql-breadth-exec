@@ -30,6 +30,29 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     end
   end
 
+  class StreamSourceNodesResolver < GraphQL::Breadth::FieldResolver
+    attr_reader :calls
+
+    def initialize(initial_items:, remaining_items:)
+      @initial_items = initial_items
+      @remaining_items = remaining_items
+      @calls = []
+    end
+
+    def resolve(exec_field, _ctx)
+      @calls << [:resolve]
+      exec_field.resolve_all(@initial_items + @remaining_items.to_a)
+    end
+
+    def resolve_stream(exec_field, _ctx, initial_count:)
+      @calls << [:resolve_stream, initial_count]
+      exec_field.resolve_all(GraphQL::Breadth::StreamSource.new(
+        initial_items: @initial_items,
+        remaining_items: @remaining_items,
+      ))
+    end
+  end
+
   SOURCE = {
     "products" => {
       "nodes" => [{
@@ -946,6 +969,109 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       }],
       result.subsequent_results.to_a,
     )
+  end
+
+  def test_incremental_result_streams_enumerable_list_without_materializing_tail
+    pulled_ids = []
+    nodes = SOURCE.fetch("products").fetch("nodes")
+    source = {
+      "products" => {
+        "nodes" => Enumerator.new do |yielder|
+          nodes.each do |node|
+            pulled_ids << node.fetch("id")
+            yielder << node
+          end
+        end,
+      },
+    }
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) {
+          id
+        }
+      }
+    }|, source:).incremental_result
+
+    assert_equal ["gid://shopify/Product/1"], pulled_ids
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{ "id" => "gid://shopify/Product/1" }],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Product/2" }],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+    assert_equal ["gid://shopify/Product/1", "gid://shopify/Product/2"], pulled_ids
+  end
+
+  def test_incremental_result_resolves_stream_source_for_streamed_list_field
+    pulled_remaining_ids = []
+    nodes = SOURCE.fetch("products").fetch("nodes")
+    remaining_items = Enumerator.new do |yielder|
+      node = nodes.fetch(1)
+      pulled_remaining_ids << node.fetch("id")
+      yielder << node
+    end
+    nodes_resolver = StreamSourceNodesResolver.new(
+      initial_items: [nodes.fetch(0)],
+      remaining_items:,
+    )
+    resolvers = BREADTH_RESOLVERS.merge(
+      "ProductConnection" => BREADTH_RESOLVERS.fetch("ProductConnection").merge(
+        "nodes" => nodes_resolver,
+      ),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) {
+          id
+        }
+      }
+    }|, resolvers:).incremental_result
+
+    assert_equal [[:resolve_stream, 1]], nodes_resolver.calls
+    assert_equal [], pulled_remaining_ids
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{ "id" => "gid://shopify/Product/1" }],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Product/2" }],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+    assert_equal ["gid://shopify/Product/2"], pulled_remaining_ids
   end
 
   def test_incremental_result_streams_with_default_initial_count
