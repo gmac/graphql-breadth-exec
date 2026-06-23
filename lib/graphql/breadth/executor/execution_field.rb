@@ -71,6 +71,7 @@ module GraphQL
           @incremental_selections = incremental_selections
           @path = nil
           @schema_path = nil
+          @stream_usage = UNDEFINED
         end
 
         #: () -> Array[ObjectType]
@@ -201,6 +202,15 @@ module GraphQL
         #: () -> graphql_arguments
         def mutable_arguments
           @mutable_arguments ||= Util.deep_copy(arguments)
+        end
+
+        #: () -> Incremental::StreamUsage?
+        def stream_usage
+          if @stream_usage.equal?(UNDEFINED)
+            @stream_usage = executor.incremental? && Util.unwrap_non_null(type).list? ? executor.planner.stream_usage_for(self) : nil
+          end
+
+          @stream_usage
         end
 
         #: () -> void

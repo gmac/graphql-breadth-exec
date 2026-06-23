@@ -4,18 +4,7 @@
 module GraphQL
   module Breadth
     module Incremental
-      class StreamDelivery
-        #: error_path
-        attr_reader :path
-
-        #: String?
-        attr_reader :label
-
-        #: (error_path, ?String?) -> void
-        def initialize(path, label = nil)
-          @path = path.freeze
-          @label = label
-        end
+      class StreamDelivery < Delivery
       end
     end
   end

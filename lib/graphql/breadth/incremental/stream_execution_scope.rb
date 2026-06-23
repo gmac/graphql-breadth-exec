@@ -11,6 +11,9 @@ module GraphQL
         #: Array[untyped]
         attr_reader :items
 
+        #: Array[error_path]
+        attr_reader :object_paths
+
         #: Integer
         attr_reader :initial_index
 
@@ -19,6 +22,9 @@ module GraphQL
 
         #: bool
         attr_reader :prepared
+
+        #: ListStreamEntry?
+        attr_reader :list_stream_entry
 
         #: (
         #|   parent_field: Executor::ExecutionField[untyped],
@@ -31,14 +37,18 @@ module GraphQL
         #|   delivery: StreamDelivery,
         #|   initial_index: Integer,
         #|   ?prepare: Proc?,
+        #|   ?list_stream_entry: ListStreamEntry?,
         #| ) -> void
-        def initialize(parent_field:, parent_type:, selections:, objects:, results:, items:, object_paths:, delivery:, initial_index:, prepare: nil)
+        def initialize(parent_field:, parent_type:, selections:, objects:, results:, items:, object_paths:, delivery:, initial_index:, prepare: nil, list_stream_entry: nil)
           @delivery = delivery
           @items = items
           @object_paths = object_paths
           @initial_index = initial_index
+          @next_index = initial_index
           @prepare = prepare
+          @list_stream_entry = list_stream_entry
           @prepared = false
+          @complete = false
           @announced = false
 
           super(
@@ -55,7 +65,7 @@ module GraphQL
         #: -> bool
         def ready?
           field = parent_field #: as !nil
-          field.scope.executed? && !field.scope.aborted?
+          !complete? && field.scope.executed? && !field.scope.aborted?
         end
 
         #: -> bool
@@ -63,14 +73,45 @@ module GraphQL
           @announced
         end
 
+        #: -> bool
+        def stream?
+          !!@list_stream_entry
+        end
+
+        #: -> bool
+        def complete?
+          @complete
+        end
+
+        #: -> void
+        def complete!
+          @complete = true
+        end
+
         #: -> StreamExecutionScope
         def prepare!
           unless @prepared
             @prepare&.call(self)
             @prepared = true
+            @complete = true unless stream?
           end
 
           self
+        end
+
+        #: (Array[untyped]) -> StreamExecutionScope
+        def prepare_list_stream_items!(raw_items)
+          reset_installment!
+          @prepare&.call(self, raw_items)
+          @prepared = true
+          self
+        end
+
+        #: -> void
+        def finish_installment!
+          @next_index = @initial_index + @items.length
+          @prepared = false
+          self.executed = false unless complete?
         end
 
         #: (Integer) -> error_path
@@ -86,6 +127,22 @@ module GraphQL
         #: (Integer) -> error_path
         def object_path(index)
           stream_item_path(index)
+        end
+
+        private
+
+        #: -> void
+        def reset_installment!
+          @initial_index = @next_index
+          @items = []
+          @objects = []
+          @results = []
+          @object_paths = []
+          @fields = {}
+          @sync_preloads = nil
+          @lazy_preloads = nil
+          @preload_promises = nil
+          @lazy_state = LAZY_STATE_PRELOADING
         end
       end
     end

@@ -29,7 +29,7 @@ The execution algorithm is proven at scale in production. This implementation st
 
 * Uses GraphQL Ruby schemas.
 * Currently no built-in validation or analysis, do it ahead of time.
-* Currently no stream.
+* Supports incremental `@defer` and `@stream` through the `incremental_result` entry point.
 * Supports input validations, but NOT input transformations (ie: "prepare" hooks).
 
 # Usage
@@ -677,9 +677,9 @@ end
 
 This architecture makes cascading resolvers run repeatedly on every field in a subtree, rather than just once at the top of the owning field's subtree. This pattern is more granular and generally safer for isolation and parallelism, though has more resolver churn than a typical depth traversal so should be used accordingly.
 
-## Incremental results (`@defer`)
+## Incremental results (`@defer` and `@stream`)
 
-Query and mutation operations that may contain `@defer` should use `incremental_result`. This always returns a `GraphQL::Breadth::Incremental::Result`, even when the operation has no active deferred work:
+Query and mutation operations that may contain `@defer` or `@stream` should use `incremental_result`. This always returns a `GraphQL::Breadth::Incremental::Result`, even when the operation has no active incremental work:
 
 ```ruby
 result = executor.incremental_result
@@ -693,9 +693,100 @@ if result.incremental?
 end
 ```
 
-When no deferred work is active, `initial_result` is the normal GraphQL result hash and `incremental?` is false. When deferred work is active, `initial_result` includes pending records and `hasNext`, and `subsequent_results` yields later incremental payloads.
+When no incremental work is active, `initial_result` is the normal GraphQL result hash and `incremental?` is false. When incremental work is active, `initial_result` includes pending records and `hasNext`, and `subsequent_results` yields later incremental payloads.
 
 The basic and incremental entry points are intentionally strict. Call either `result` OR `incremental_result` for a query or mutation executor depending on the request's support for incremental delivery (ex: multi-part and SSE requests); switching entry points after execution has started raises an implementation error.
+
+### Streaming lists
+
+Fields that support `@stream` must opt into the list stream API. The ordinary `resolve` method remains responsible for non-incremental execution, while `resolve_list_stream` loads items for active stream installments:
+
+```ruby
+class ProductNodesResolver < GraphQL::Breadth::FieldResolver
+  def stream?
+    true
+  end
+
+  def resolve(exec_field, context)
+    exec_field.map_objects { |connection| connection.nodes }
+  end
+
+  def resolve_list_stream(objects, context, state:, object_states:, limit:, iteration:, field:)
+    objects.map.with_index do |connection, index|
+      object_state = object_states[index]
+      cursor = object_state[:cursor]
+      page_size = limit || 25
+
+      page = ProductLoader.load_page(
+        connection,
+        first: page_size,
+        after: cursor,
+        context: context,
+      )
+
+      object_state[:cursor] = page.end_cursor
+
+      GraphQL::Breadth::ListStreamChunk.new(
+        items: page.nodes,
+        complete: !page.has_next_page?,
+      )
+    end
+  end
+end
+```
+
+`resolve_list_stream` receives only the parent objects that still have active stream deliveries. Once an object returns a complete chunk, it is dropped from future calls. This lets resolvers keep batching active streams together while avoiding repeated work for streams that have already finished.
+
+The method arguments are:
+
+* `objects`: the active parent objects for this installment.
+* `state`: a shared hash for the streamed field instance across all installments.
+* `object_states`: one persistent hash per active object, mapped by index to `objects`.
+* `limit`: the directive's `initialCount` for the initial call, then `nil` for later calls.
+* `iteration`: the call count for this streamed field batch.
+* `field`: a `ListStreamField` call object with the streamed field's `arguments`, `path`, `lazy`, `await_all`, and other field helpers.
+
+Return one result per object. A `GraphQL::Breadth::ListStreamChunk` is the explicit form: `items:` are emitted in this installment and `complete:` controls whether that object's stream remains active. Returning an array is shorthand for "emit these items and keep going" unless the array is empty, in which case the object is complete. Returning `nil` completes the object without emitting items.
+
+If the directive uses `@stream(initialCount: 0)`, the initial result includes no list items and the first `resolve_list_stream` call happens while preparing the first subsequent payload.
+
+```ruby
+GraphQL::Breadth::ListStreamEntry.new(
+  object: object,
+  state: nil,
+)
+
+class ProductNodesResolver < GraphQL::Breadth::FieldResolver
+  def stream?
+    true
+  end
+
+  def resolve(exec_field, context)
+    exec_field.map_objects { |connection| connection.nodes }
+  end
+
+  def resolve_list_stream(stream_exec_field, context, limit:)
+    # StreamExecutionField < ExecutionField
+    # owns its own pending_objects (objects filtered after each iteration)
+    limit ||= 10
+
+    stream_exec_field.lazy(
+      MyStreamingListLoader,
+      keys: stream_exec_field.pending_entries,
+      args: { limit: limit },
+    ).then do |all_results|
+      stream_exec_field.pending_entries.map.with_index do |entry, index|
+        results = all_results[index]
+        entry.set_state(results.last&.id)
+        GraphQL::Breadth::ListStreamChunk.new(
+          items: results,
+          complete: results.size <= limit,
+        )
+      end
+    end
+  end
+end
+```
 
 ## Subscriptions
 
