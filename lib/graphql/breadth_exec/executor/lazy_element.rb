@@ -56,7 +56,7 @@ module GraphQL::BreadthExec
           loader.load(element: self, keys: keys).with_registry(preload_promises)
         else
           @lazy_preloads ||= {}
-          deferred = (@lazy_preloads[[loader_class, args]] ||= Deferred.new(registry: preload_promises))
+          deferred = (@lazy_preloads[[loader_class, args]] ||= ExecutionPromise::Deferred.new(registry: preload_promises))
           deferred.promise
         end
       end

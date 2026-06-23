@@ -23,11 +23,15 @@ module GraphQL::BreadthExec
       #: Array[ExecutionDirective]
       attr_reader :directives
 
-      #: FieldResolver[untyped]
+      #: FieldResolver
       attr_reader :resolver
 
       #: Array[GraphQL::Language::Nodes::Field]
       attr_reader :nodes
+
+      # Only populated during incremental (`@defer`) execution; nil on the hot path.
+      #: Array[Incremental::Selection]?
+      attr_reader :incremental_selections
 
       #: graphql_arguments
       attr_reader :arguments
@@ -46,10 +50,11 @@ module GraphQL::BreadthExec
       #|   nodes: Array[GraphQL::Language::Nodes::Field],
       #|   scope: ExecutionScope,
       #|   definition: GraphQL::Schema::Field,
-      #|   resolver: FieldResolver[untyped],
+      #|   resolver: FieldResolver,
       #|   ?directives: Array[ExecutionDirective],
+      #|   ?incremental_selections: Array[Incremental::Selection]?,
       #| ) -> void
-      def initialize(key, nodes:, scope:, definition:, resolver:, directives: EMPTY_ARRAY)
+      def initialize(key, nodes:, scope:, definition:, resolver:, directives: EMPTY_ARRAY, incremental_selections: nil)
         super()
         @key = key.freeze
         @scope = scope
@@ -62,6 +67,7 @@ module GraphQL::BreadthExec
         @result = nil
         @arguments, @argument_errors = executor.input.coerce_argument_values(@definition, @nodes.first)
         @mutable_arguments = nil
+        @incremental_selections = incremental_selections
         @path = nil
         @schema_path = nil
       end
@@ -138,7 +144,7 @@ module GraphQL::BreadthExec
 
       #: () -> Array[String]
       def path
-        @path ||= (@scope ? [*@scope.path, @key] : []).freeze
+        @path ||= [*@scope.path, @key].freeze
       end
 
       #: (Integer) -> error_path
@@ -168,7 +174,12 @@ module GraphQL::BreadthExec
 
       #: [T] (T) -> Array[T]
       def resolve_all(value)
-        value = handle_or_reraise(value) if value.is_a?(StandardError)
+        value = case value
+        when StandardError
+          handle_or_reraise(value)
+        else
+          value
+        end
         Array.new(objects.length, value)
       end
 

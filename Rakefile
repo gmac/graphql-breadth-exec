@@ -56,7 +56,7 @@ namespace :benchmark do
   end
 
   desc "Benchmark one lazy scalar field across many objects"
-  task :lazy_field_batch do
+  task :resolve_lazy_batch do
     prepare_benchmark
     GraphQLBenchmark.benchmark_lazy_field_batch
   end

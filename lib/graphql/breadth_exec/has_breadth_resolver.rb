@@ -21,7 +21,7 @@ module GraphQL
           end
         end
 
-        #: FieldResolver[untyped]?
+        #: FieldResolver?
         attr_reader :breadth_resolver
 
         #: -> (String | Symbol)
@@ -29,7 +29,7 @@ module GraphQL
           super
         end
 
-        #: (Symbol | FieldResolver[untyped] | singleton(FieldResolver) | nil) -> void
+        #: (Symbol | FieldResolver | singleton(FieldResolver) | nil) -> void
         def breadth_resolver=(value)
           @breadth_resolver = case value
           when Symbol
@@ -73,7 +73,7 @@ module GraphQL
         #: DirectiveResolver?
         attr_accessor :breadth_resolver
 
-        #: (Class) -> void
+        #: (untyped) -> void
         def inherited(base)
           super
           base.breadth_resolver = breadth_resolver

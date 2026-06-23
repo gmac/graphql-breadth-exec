@@ -50,6 +50,7 @@ module GraphQL::BreadthExec
       #|   ?parent_field: ExecutionField[untyped]?,
       #|   ?path: Array[String],
       #|   ?parent: ExecutionScope?,
+      #|   ?deferred: bool,
       #| ) -> void
       def initialize(
         executor:,
@@ -60,7 +61,8 @@ module GraphQL::BreadthExec
         abstraction: nil,
         parent_field: nil,
         path: [],
-        parent: nil
+        parent: nil,
+        deferred: false
       )
         super()
         @executor = executor
@@ -73,6 +75,7 @@ module GraphQL::BreadthExec
         @path = (parent_field ? parent_field.path : path).freeze
         @parent = parent_field ? parent_field.scope : parent
         @fields = {}
+        @deferred = deferred
         @executed = false
         @root = nil
         @planning_root = nil
@@ -101,7 +104,11 @@ module GraphQL::BreadthExec
 
       #: -> Array[String]
       def schema_path
-        parent_field ? parent_field.schema_path : EMPTY_ARRAY
+        if (field = parent_field)
+          field.schema_path
+        else
+          EMPTY_ARRAY
+        end
       end
 
       #: (Integer) -> error_path
@@ -125,10 +132,29 @@ module GraphQL::BreadthExec
       end
 
       #: -> bool
+      def deferred?
+        @deferred
+      end
+
+      #: -> ExecutionScope?
+      def deferred_root
+        return self if deferred?
+
+        exec_scope = @parent
+        while exec_scope
+          return exec_scope if exec_scope.deferred?
+
+          exec_scope = exec_scope.parent
+        end
+
+        nil
+      end
+
+      #: -> bool
       def aborted_subtree?
         return true if @aborted
 
-        exec_field = parent_field
+        exec_field = parent_field #: ExecutionField[untyped]?
         while exec_field
           if exec_field.scope.aborted?
             abort!

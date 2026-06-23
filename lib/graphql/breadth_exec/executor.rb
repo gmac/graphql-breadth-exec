@@ -16,7 +16,7 @@ module GraphQL
   module BreadthExec
     class Executor
       #: type type_resolver = ^(untyped, GraphQL::Query::Context) -> singleton(GraphQL::Schema::Member)?
-      #: type resolver = FieldResolver[untyped] | DirectiveResolver | type_resolver
+      #: type resolver = FieldResolver | DirectiveResolver | type_resolver
 
       EMPTY_ARRAY = [].freeze
       EMPTY_OBJECT = {}.freeze
@@ -43,6 +43,9 @@ module GraphQL
 
       #: ExecutionPlanner
       attr_reader :planner
+
+      #: Incremental::Context?
+      attr_reader :incremental
 
       #: Hash[untyped, singleton(GraphQL::Schema::Object)]?
       attr_reader :abstract_result_types
@@ -71,7 +74,7 @@ module GraphQL
         @root_object = root_object
         @context_value = context
         @tracers = tracers
-        @result = {}
+        @result = nil
         @data = {}
         @errors = []
         @exec_queue = []
@@ -80,8 +83,24 @@ module GraphQL
         @abstract_result_types = nil
         @loader_cache = nil
         @paths = nil
+        @incremental = nil
         @executed = false
         @aborted = false
+      end
+
+      #: -> bool
+      def query?
+        @query.selected_operation.operation_type == ExecutionPlanner::QUERY_OPERATION
+      end
+
+      #: -> bool
+      def mutation?
+        @query.selected_operation.operation_type == ExecutionPlanner::MUTATION_OPERATION
+      end
+
+      #: -> bool
+      def subscription?
+        @query.selected_operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
       end
 
       #: -> Hash[String, GraphQL::Language::Nodes::FragmentDefinition]
@@ -94,6 +113,11 @@ module GraphQL
         @input.variables
       end
 
+      #: -> extensions_hash
+      def response_extensions
+        @context.response_extensions
+      end
+
       #: -> PathFormatter
       def paths
         @paths ||= PathFormatter.new
@@ -101,26 +125,42 @@ module GraphQL
 
       #: -> graphql_result
       def result
-        operation = @query.selected_operation
-        if operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
-          raise ImplementationError, "Use result_or_subscribe for subscription operations"
-        end
+        raise ImplementationError, "Use subscribe for subscription operations" if subscription?
+        raise ImplementationError, "Cannot call result after incremental_result" if incremental?
 
         return @result if executed?
 
-        execute
+        @result = execute
+      end
+
+      #: -> Incremental::Result
+      def incremental_result
+        raise ImplementationError, "Use subscribe for subscription operations" if subscription?
+
+        return @result if @result.is_a?(Incremental::Result)
+        raise ImplementationError, "Cannot call incremental_result after result" if executed?
+
+        @incremental = Incremental::Context.new(self, data: @data)
+        initial_result = execute
+        subsequent_results = EMPTY_ARRAY
+        pending_deliveries = @incremental.prepare_pending
+
+        unless pending_deliveries.empty?
+          initial_result["pending"] = @incremental.pending_payloads(pending_deliveries)
+          initial_result["hasNext"] = true
+          subsequent_results = Enumerator.new { execute_next_incremental_result(_1) }
+        end
+
+        @result = Incremental::Result.new(initial_result: initial_result, subsequent_results: subsequent_results)
       end
 
       #: -> (SubscriptionResponseStream | graphql_result)
-      def result_or_subscribe
+      def subscribe
+        raise ImplementationError, "Only allowed for subscription operations" unless subscription?
+
         return @result if executed?
 
-        operation = @query.selected_operation
-        @result = if operation.operation_type == ExecutionPlanner::SUBSCRIPTION_OPERATION
-          subscribe(operation)
-        else
-          execute
-        end
+        @result = execute_subscription
       end
 
       #: (untyped) -> graphql_result
@@ -162,30 +202,27 @@ module GraphQL
             error
           rescue Exception => exception
             @raised_exception = exception
-            @tracers.each { _1.on_exception(exception, @context, exec_field:) }
+            unless @tracers.empty?
+              @tracers.each { _1.on_exception(exception, @context, exec_field:) }
+            end
             raise exception
           end
           ExecutionError.from(handled_error, exec_field:, cause: original_error)
         end
       end
 
-      #: (ExecutionError, ?untyped?, ?exec_field: ExecutionField[untyped]?) -> ExecutionError
+      #: (ExecutionError, ?untyped?, ?exec_field: ExecutionField[untyped]?) -> StandardError
       def add_error(error, result = nil, exec_field: nil)
         error = exec_field ? ExecutionError.from(error, exec_field:) : error
 
         if exec_field
-          current_type = exec_field.type
+          current_type = exec_field.type #: untyped
           current_type = current_type.of_type while current_type.list? || (current_type.non_null? && current_type.of_type.list?)
           error = invalidate_non_null_value(exec_field, current_type, error) if current_type.non_null?
         end
 
         @invalidated_results[result || error] = error
         error
-      end
-
-      #: -> Integer
-      def error_count
-        @invalidated_results.size
       end
 
       #: -> ErrorFormatter
@@ -205,6 +242,11 @@ module GraphQL
       #: -> bool
       def executed?
         @executed
+      end
+
+      #: -> bool
+      def incremental?
+        !!@incremental
       end
 
       protected
@@ -249,18 +291,7 @@ module GraphQL
 
             @planner.plan_scopes(root_scopes).each do |exec_scope|
               @exec_queue << exec_scope
-
-              # Process eager scopes, then process resulting lazy fields
-              # Work is always dequeued for processing to maintain a clean queue state
-              until aborted? || (@exec_queue.empty? && @lazy_queue.empty?)
-                if !@exec_queue.empty?
-                  exec_scope = @exec_queue.shift #: as !nil
-                  execute_scope(exec_scope)
-                else
-                  lazy_elements = @lazy_queue.shift(@lazy_queue.length)
-                  execute_lazy(lazy_elements)
-                end
-              end
+              run!
             end
 
             unless @tracers.empty?
@@ -306,6 +337,23 @@ module GraphQL
 
       private
 
+      #: (?Array[ExecutionScope]) -> void
+      def run!(exec_scopes = EMPTY_ARRAY)
+        @exec_queue.concat(exec_scopes) unless exec_scopes.empty?
+
+        # Process eager scopes, then process resulting lazy fields.
+        # Work is always dequeued for processing to maintain a clean queue state.
+        until aborted? || (@exec_queue.empty? && @lazy_queue.empty?)
+          if !@exec_queue.empty?
+            exec_scope = @exec_queue.shift #: as !nil
+            execute_scope(exec_scope)
+          else
+            lazy_elements = @lazy_queue.shift(@lazy_queue.length)
+            execute_lazy(lazy_elements)
+          end
+        end
+      end
+
       #: (
       #|   Array[ExecutionDirective],
       #|   ?current_field: ExecutionField[untyped]?,
@@ -313,7 +361,7 @@ module GraphQL
       #| ) { () -> untyped } -> untyped
       def execute_with_directives(exec_directives, current_field: nil, at: 0, &block)
         while at < exec_directives.size
-          exec_directive = exec_directives[at]
+          exec_directive = exec_directives[at] #: as !nil
 
           if exec_directive.resolver.applies?(exec_directive, current_field)
             exec_directive.validate!
@@ -371,6 +419,10 @@ module GraphQL
           return
         end
 
+        unless @tracers.empty?
+          @tracers.each { _1.before_scope(exec_scope, @context) }
+        end
+
         exec_scope.fields.each_value do |exec_field|
           execute_field(exec_field) unless exec_field.scope.aborted?
         end
@@ -406,7 +458,7 @@ module GraphQL
         pending_loaders = (@loader_cache || EMPTY_OBJECT).each_value.reject { _1.promised.empty? }
 
         if pending_loaders.empty?
-          raise ImplementationError, "Lazy #{lazy_elements.first&.inspect} produced a promise without a loader"
+          raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
         end
 
         pending_loaders.each do |loader|
@@ -420,7 +472,12 @@ module GraphQL
             next
           end
 
+          lazy_start_time = EMPTY_TIMER
           begin
+            unless @tracers.empty?
+              lazy_start_time = timer
+              @tracers.each { _1.before_lazy_set(loader, loader_elements, @context) }
+            end
             loader.execute!(@context)
           rescue StandardError => e
             handled_error = handle_or_reraise(e)
@@ -434,6 +491,11 @@ module GraphQL
                 element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
                 element.abort!
               end
+            end
+          ensure
+            unless @tracers.empty?
+              duration = timer(lazy_start_time)
+              @tracers.each { _1.after_lazy_set(loader, loader_elements, @context, duration:) }
             end
           end
         end
@@ -512,7 +574,7 @@ module GraphQL
         if promise.rejected?
           reason = promise.reason
           unless reason.is_a?(StandardError)
-            reason = UnknownLazyRejectionError.new("Lazy #{element.inspect} was rejected for an unknown reason: #{reason}")
+            reason = UnknownLazyRejectionError.new("Lazy #{element} was rejected for an unknown reason: #{reason}")
           end
 
           exec_field = case element
@@ -545,12 +607,14 @@ module GraphQL
           return
         end
 
-        parent_type = exec_field.scope.parent_type
-        field_name = exec_field.name
         parent_objects = exec_field.scope.objects
 
+        resolve_start_time = EMPTY_TIMER
         begin
-          @tracers.each { _1.before_resolve_field(parent_type, field_name, parent_objects.length, @context) }
+          unless @tracers.empty?
+            resolve_start_time = timer
+            @tracers.each { _1.before_resolve_field(exec_field, @context) }
+          end
           exec_field.lazy_state_executing!
           exec_field.validate!
           pre_authorized = @authorization.authorized_field?(exec_field, @context)
@@ -571,7 +635,10 @@ module GraphQL
           @errors << error if error.base_error?
           exec_field.result = Array.new(parent_objects.length, error)
         ensure
-          @tracers.each { _1.after_resolve_field(parent_type, field_name, parent_objects.length, @context) }
+          unless @tracers.empty?
+            duration = timer(resolve_start_time)
+            @tracers.each { _1.after_resolve_field(exec_field, @context, duration:) }
+          end
         end
 
         if exec_field.lazy_result?
@@ -784,7 +851,11 @@ module GraphQL
         if highest_nulled_depth.zero?
           # Mark the entire executor as aborted when non-null propagation hits the top.
           # This prevents subsequent isolated root scopes (mutations) from running.
-          @aborted = true
+          if (deferred_root = exec_field.scope.deferred_root)
+            deferred_root.abort!
+          else
+            @aborted = true
+          end
         elsif highest_list_depth.negative? || highest_nulled_depth <= highest_list_depth
           # Abort all non-null ancestor scopes that meet or exceed the highest-level list.
           # (all lists must be completely invalidated, or else remain alive).
@@ -848,6 +919,9 @@ module GraphQL
 
         scopes = []
         abstract_scope = AbstractExecutionScope.new(parent_type: return_type, parent_field: exec_field, scopes: scopes)
+        unless @tracers.empty?
+          @tracers.each { _1.before_abstract_scope(abstract_scope, @context) }
+        end
         next_objects_by_type.each do |impl_type, impl_type_objects|
           scopes << ExecutionScope.new(
             executor: self,
@@ -855,6 +929,7 @@ module GraphQL
             parent_field: exec_field,
             parent_type: impl_type,
             selections: exec_field.selections,
+            deferred: exec_field.scope.deferred?,
             objects: impl_type_objects,
             results: next_results_by_type[impl_type],
           )
@@ -863,9 +938,10 @@ module GraphQL
         @exec_queue.concat(@planner.plan_scopes(scopes))
       end
 
-      #: (GraphQL::Language::Nodes::OperationDefinition) -> (SubscriptionResponseStream | graphql_result)
-      def subscribe(operation)
+      #: -> (SubscriptionResponseStream | graphql_result)
+      def execute_subscription
         @executed = true
+        operation = @query.selected_operation
 
         unless @context.errors.empty?
           return build_result(errors: @context.errors.map(&:to_h))
@@ -909,8 +985,55 @@ module GraphQL
         end
       end
 
+      #: (Enumerator::Yielder) -> void
+      def execute_next_incremental_result(yielder)
+        pending_payloads = []
+        incremental_payloads = []
+        completed_deliveries = []
+        completed_errors_by_delivery = {}.compare_by_identity
+
+        loop do
+          ready_scopes = @incremental.ready_scopes
+          break if ready_scopes.empty?
+
+          initial_error_count = @invalidated_results.size
+          run!(@planner.plan_scopes(ready_scopes))
+          has_errors = @invalidated_results.size > initial_error_count
+
+          ready_scopes.each do |exec_scope|
+            deliveries = @incremental.deliveries_for(exec_scope)
+            deliveries.each do |index, path, deferred_deliveries|
+              data = exec_scope.results[index]
+              errors = EMPTY_ARRAY
+              if has_errors
+                data, errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
+              end
+
+              if data.nil? && !errors.empty?
+                deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(errors) }
+              else
+                incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors:)
+              end
+              completed_deliveries.concat(deferred_deliveries)
+            end
+
+            exec_scope.executed = true
+            pending_payloads.concat(@incremental.pending_payloads(@incremental.prepare_pending))
+          end
+        end
+
+        completed_payloads = @incremental.completed_payloads(completed_deliveries, errors_by_delivery: completed_errors_by_delivery)
+        payload = { "hasNext" => false }
+        payload["pending"] = pending_payloads unless pending_payloads.empty?
+        payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
+        payload["completed"] = completed_payloads unless completed_payloads.empty?
+        yielder << payload
+      end
+
       #: (?data: Util::NilLike | graphql_result | nil, ?errors: Array[error_hash]) -> graphql_result
       def build_result(data: UNDEFINED, errors: EMPTY_ARRAY)
+        result = {}
+
         # Truncate errors but preserve GraphQL-Ruby's validation error limit message when present.
         # For execution errors, add our own message to inform truncation.
         if @max_reported_errors && errors.size > @max_reported_errors
@@ -921,23 +1044,19 @@ module GraphQL
         end
 
         # install errors first to surface at the top
-        @result["errors"] = errors unless errors.empty?
+        result["errors"] = errors unless errors.empty?
 
         # only install data when execution has run and generated (possibly partial) results
-        @result["data"] = data unless data.equal?(UNDEFINED)
+        result["data"] = data unless data.equal?(UNDEFINED)
 
-        # collect extensions that have already been added to the result by tracers,
-        # and check for extensions defined through `@context.response_extensions`.
-        # extensions always get re-added to the result as the final key
-        result_extensions = @result.delete("extensions")
+        # Check for extensions defined through `@context.response_extensions`.
+        # Extensions always get added to the result as the final key.
         has_context_extensions = @context.namespace?(:__query_result_extensions__)
-        if result_extensions || has_context_extensions
-          result_extensions ||= {}
-          result_extensions.merge!(@context.namespace(:__query_result_extensions__)) if has_context_extensions
-          @result["extensions"] = Util.deep_copy(result_extensions, stringify_keys: true)
+        if has_context_extensions
+          result["extensions"] = Util.deep_copy(response_extensions, stringify_keys: true)
         end
 
-        @result
+        result
       end
 
       #: (ExecutionError, ?exec_field: ExecutionField[untyped]?) -> Array[error_hash]

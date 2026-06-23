@@ -115,11 +115,11 @@ class GraphQL::BreadthExec::FieldResolversTest < Minitest::Test
 
   def test_handle_resolved_wraps_promise_with_then
     resolver = HandleResolvedTestResolver.new
-    promise = GraphQL::BreadthExec::ExecutionPromise.new
+    promise = GraphQL::BreadthExec::Executor::ExecutionPromise.new
 
     result = resolver.handle_resolved(promise) { |values| values.map(&:upcase) }
 
-    assert_instance_of GraphQL::BreadthExec::ExecutionPromise, result
+    assert_instance_of GraphQL::BreadthExec::Executor::ExecutionPromise, result
   end
 
   private

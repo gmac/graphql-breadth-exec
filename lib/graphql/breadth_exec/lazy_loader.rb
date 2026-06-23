@@ -18,7 +18,7 @@ module GraphQL
         #: Hash[untyped, untyped]?
         attr_reader :eager_values
 
-        #: ExecutionPromise
+        #: Executor::ExecutionPromise
         attr_reader :promise
 
         #: (
@@ -26,7 +26,7 @@ module GraphQL
         #|   keys: Array[untyped],
         #|   identities: Array[untyped],
         #|   ?eager_values: Hash[untyped, untyped]?,
-        #|   ?pre_deferred: Deferred?,
+        #|   ?pre_deferred: Executor::ExecutionPromise::Deferred?,
         #| ) -> void
         def initialize(element:, keys:, identities:, eager_values: nil, pre_deferred: nil)
           @element = element
@@ -34,7 +34,7 @@ module GraphQL
           @identities = identities
           @eager_values = eager_values
           @resolver = pre_deferred&.resolver
-          @promise = pre_deferred&.promise || ExecutionPromise.new { |resolve, _reject| @resolver = resolve }
+          @promise = pre_deferred&.promise || Executor::ExecutionPromise.new { |resolve, _reject| @resolver = resolve }
         end
 
         #: (untyped) -> void
@@ -101,8 +101,8 @@ module GraphQL
       #|   keys: Array[untyped],
       #|   ?eager_values: Hash[untyped, untyped]?,
       #|   ?load_nil_keys: bool,
-      #|   ?pre_deferred: Deferred?,
-      #| ) -> ExecutionPromise
+      #|   ?pre_deferred: Executor::ExecutionPromise::Deferred?,
+      #| ) -> Executor::ExecutionPromise
       def load(element:, keys:, eager_values: nil, load_nil_keys: false, pre_deferred: nil)
         eager_values = nil if eager_values&.empty?
         compact = !load_nil_keys

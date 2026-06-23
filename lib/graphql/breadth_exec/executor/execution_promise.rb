@@ -3,193 +3,230 @@
 
 module GraphQL
   module BreadthExec
-    class ExecutionPromise
-      PENDING = :pending
-      FULFILLED = :fulfilled
-      REJECTED = :rejected
+    class Executor
+      class ExecutionPromise
+        class Deferred
+          #: Executor::ExecutionPromise
+          attr_reader :promise
 
-      #: Array[ExecutionPromise]?
-      attr_reader :registry
+          #: ^(untyped) -> untyped
+          attr_reader :resolver
 
-      #: (?registry: Array[ExecutionPromise]?) ?{ (Proc, Proc) -> void } -> void
-      def initialize(registry: nil, &executor)
-        @state = PENDING
-        @value = nil
-        @reason = nil
-        @observers = []
-        @registry = nil
-        with_registry(registry) if registry
-
-        if executor
-          begin
-            executor.call(method(:resolve), method(:reject))
-          rescue StandardError => e
-            reject(e)
+          #: (?registry: Array[ExecutionPromise]?) -> void
+          def initialize(registry: nil)
+            @resolver = nil
+            @promise = ExecutionPromise.new(registry:) { |resolve, _| @resolver = resolve }
           end
         end
-      end
 
-      #: (Array[ExecutionPromise]) -> ExecutionPromise
-      def self.all(promises)
-        raise ArgumentError, "promises cannot be empty" if promises.empty?
+        PENDING = :pending
+        FULFILLED = :fulfilled
+        REJECTED = :rejected
 
-        new do |resolve, reject|
-          results = Array.new(promises.length)
-          completed = 0
-          promises.each_with_index do |promise, index|
-            promise.then(
-              ->(value) {
-                results[index] = value
-                completed += 1
-                resolve.call(results) if completed == promises.length
-              },
-              reject,
-            )
+        RAISE_REASON = ->(reason) { raise reason }
+        IDENTITY = ->(value) { value }
+
+        class << self
+          #: (Array[ExecutionPromise]) -> ExecutionPromise
+          def all(promises)
+            raise ArgumentError, "promises cannot be empty" if promises.empty?
+
+            ExecutionPromise.new do |resolve, reject|
+              results = Array.new(promises.length)
+              completed = 0
+              total = promises.length
+
+              promises.each_with_index do |promise, index|
+                promise.then(
+                  ->(value) {
+                    results[index] = value
+                    completed += 1
+                    resolve.call(results) if completed == total
+                  },
+                  reject,
+                )
+              end
+            end
           end
         end
-      end
 
-      #: (Array[ExecutionPromise]) -> ExecutionPromise
-      def with_registry(registry)
-        @registry = registry
-        registry << self unless registry.include?(self)
-        self
-      end
+        attr_reader :registry
 
-      #: (
-      #|   ?(^(untyped value) -> untyped | Proc)? on_fulfilled,
-      #|   ?(^(untyped) -> void | Proc)? on_rejected
-      #| ) ?{ (untyped) -> untyped } -> ExecutionPromise
-      def then(on_fulfilled = nil, on_rejected = nil, &block)
-        raise ArgumentError, "Either on_fulfilled or block is required" unless on_fulfilled || on_rejected || block_given?
-        raise ArgumentError, "Exactly one of on_fulfilled or block is required" if on_fulfilled && block_given?
+        #: (?registry: Array[ExecutionPromise]?) ?{ (Proc, Proc) -> void } -> void
+        def initialize(registry: nil, &block)
+          @state = PENDING
+          @value = nil #: untyped
+          @reason = nil #: Exception?
+          @observers = nil #: Array[untyped]?
 
-        next_promise = self.class.new(registry: @registry)
-        fulfilled_handler = on_fulfilled || block
-        rejected_handler = on_rejected || ->(reason) { raise reason }
+          with_registry(registry) if registry
 
-        if resolved?
-          next_promise.send(:dispatch_fulfilled, @value, fulfilled_handler)
-        elsif rejected?
-          next_promise.send(:dispatch_rejected, @reason, rejected_handler)
-        else
-          @observers << [next_promise, fulfilled_handler, rejected_handler]
+          if block_given?
+            begin
+              yield(
+                ->(value) { resolve(value) },
+                ->(reason) { reject(reason) }
+              )
+            rescue => init_error
+              reject(init_error)
+            end
+          end
         end
 
-        next_promise
-      end
+        #: (Array[ExecutionPromise]) -> ExecutionPromise
+        def with_registry(registry)
+          @registry = registry
+          @registry << self unless registry.include?(self)
+          self
+        end
 
-      #: (?(^(untyped) -> void | Proc)? on_rejected) ?{ (untyped) -> untyped } -> ExecutionPromise
-      def catch(on_rejected = nil, &block)
-        self.then(->(value) { value }, on_rejected || block)
-      end
+        #: (
+        #|   ?(^(untyped value) -> untyped | Proc)? on_fulfilled,
+        #|   ?(^(Exception) -> void | Proc)? on_rejected
+        #| ) ?{ (untyped) -> untyped } -> ExecutionPromise
+        def then(on_fulfilled = nil, on_rejected = nil, &block)
+          raise ArgumentError, "Either on_fulfilled or block is required" unless on_fulfilled || block_given?
+          raise ArgumentError, "Exactly one of on_fulfilled or block is required" if on_fulfilled && block_given?
 
-      #: () -> bool
-      def resolved?
-        @state == FULFILLED
-      end
+          handler = on_fulfilled || block
+          next_promise = ExecutionPromise.new(registry: @registry)
 
-      #: () -> bool
-      def rejected?
-        @state == REJECTED
-      end
-
-      #: () -> bool
-      def pending?
-        @state == PENDING
-      end
-
-      #: () -> untyped?
-      def value
-        @value if resolved?
-      end
-
-      #: () -> untyped?
-      def reason
-        @reason if rejected?
-      end
-
-      private
-
-      #: (untyped) -> void
-      def resolve(value)
-        return unless pending?
-
-        if value.is_a?(ExecutionPromise)
-          if value.equal?(self)
-            reject(StandardError.new("A promise cannot resolve to itself"))
-          elsif value.resolved?
-            resolve(value.value)
-          elsif value.rejected?
-            reject(value.reason)
+          case @state
+          when FULFILLED
+            next_promise.dispatch_fulfilled(@value, handler)
+          when REJECTED
+            next_promise.dispatch_rejected(@reason, on_rejected || RAISE_REASON)
           else
-            value.then(method(:resolve), method(:reject))
+            subscribe(next_promise, handler, on_rejected || RAISE_REASON)
           end
-          return
+
+          next_promise
         end
 
-        @state = FULFILLED
-        @value = value
-        notify_fulfilled
-      end
-
-      #: (untyped) -> void
-      def reject(reason)
-        return unless pending?
-
-        @state = REJECTED
-        @reason = reason
-        notify_rejected
-      end
-
-      #: (untyped, Proc?) -> void
-      def dispatch_fulfilled(value, handler)
-        handler ? settle_from_handler(value, handler) : resolve(value)
-      end
-
-      #: (untyped, Proc?) -> void
-      def dispatch_rejected(reason, handler)
-        handler ? settle_from_handler(reason, handler) : reject(reason)
-      end
-
-      #: (untyped, Proc) -> void
-      def settle_from_handler(input, handler)
-        resolve(handler.call(input))
-      rescue StandardError => e
-        reject(e)
-      end
-
-      #: () -> void
-      def notify_fulfilled
-        observers = @observers
-        @observers = []
-        observers.each do |promise, on_fulfilled, _on_rejected|
-          promise.send(:dispatch_fulfilled, @value, on_fulfilled)
+        def catch(on_rejected = nil, &block)
+          self.then(IDENTITY, on_rejected || block)
         end
-      end
 
-      #: () -> void
-      def notify_rejected
-        observers = @observers
-        @observers = []
-        observers.each do |promise, _on_fulfilled, on_rejected|
-          promise.send(:dispatch_rejected, @reason, on_rejected)
+        #: () -> bool
+        def resolved?
+          @state == FULFILLED
         end
-      end
-    end
 
-    class Deferred
-      #: ExecutionPromise
-      attr_reader :promise
+        #: () -> bool
+        def rejected?
+          @state == REJECTED
+        end
 
-      #: ^(untyped) -> untyped
-      attr_reader :resolver
+        #: () -> bool
+        def pending?
+          @state == PENDING
+        end
 
-      #: (?registry: Array[ExecutionPromise]?) -> void
-      def initialize(registry: nil)
-        @resolver = nil
-        @promise = ExecutionPromise.new(registry: registry) do |resolve, _reject|
-          @resolver = resolve
+        #: () -> untyped?
+        def value
+          @value if resolved?
+        end
+
+        #: () -> untyped?
+        def reason
+          @reason if rejected?
+        end
+
+        protected
+
+        #: (untyped, Proc?) -> void
+        def dispatch_fulfilled(value, handler)
+          if handler
+            settle_from_handler(value, handler)
+          else
+            resolve(value)
+          end
+        end
+
+        #: (untyped, Proc?) -> void
+        def dispatch_rejected(reason, handler)
+          if handler
+            settle_from_handler(reason, handler)
+          else
+            reject(reason)
+          end
+        end
+
+        #: (ExecutionPromise, Proc?, Proc?) -> void
+        def subscribe(observer, on_fulfilled, on_rejected)
+          if @observers
+            @observers.push(observer, on_fulfilled, on_rejected)
+          else
+            @observers = [observer, on_fulfilled, on_rejected]
+          end
+        end
+
+        private
+
+        #: (untyped) -> void
+        def resolve(result)
+          return unless @state == PENDING
+
+          if result.is_a?(ExecutionPromise)
+            if result.equal?(self)
+              reject(ArgumentError.new("A promise cannot resolve to itself"))
+              return
+            end
+
+            if result.resolved?
+              resolve(result.value)
+            elsif result.rejected?
+              reject(result.reason)
+            else
+              result.subscribe(self, nil, nil)
+            end
+          else
+            @state = FULFILLED
+            @value = result
+            notify_fulfilled
+          end
+        end
+
+        #: (untyped) -> void
+        def reject(reason)
+          return unless @state == PENDING
+
+          @state = REJECTED
+          @reason = reason
+          notify_rejected
+        end
+
+        #: (untyped, Proc) -> void
+        def settle_from_handler(input, handler)
+          resolve(handler.call(input))
+        rescue => error
+          reject(error)
+        end
+
+        #: () -> void
+        def notify_fulfilled
+          return unless @observers
+
+          observers = @observers
+          @observers = nil
+          i = 0
+          while i < observers.length
+            observers[i].dispatch_fulfilled(@value, observers[i + 1])
+            i += 3
+          end
+        end
+
+        #: () -> void
+        def notify_rejected
+          return unless @observers
+
+          observers = @observers
+          @observers = nil
+          i = 0
+          while i < observers.length
+            observers[i].dispatch_rejected(@reason, observers[i + 2])
+            i += 3
+          end
         end
       end
     end
