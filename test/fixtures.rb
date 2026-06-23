@@ -52,14 +52,14 @@ SCHEMA
 
 SCHEMA = GraphQL::Schema.from_definition(SDL)
 
-class WriteValueResolver < GraphQL::BreadthExec::FieldResolver
+class WriteValueResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, _ctx)
     exec_field.objects.each { _1["writeValue"]["value"] = exec_field.arguments[:value] }
     exec_field.objects.map { _1["writeValue"] }
   end
 end
 
-class SimpleLoader < GraphQL::BreadthExec::LazyLoader
+class SimpleLoader < GraphQL::Breadth::LazyLoader
   def initialize(group: nil)
     super()
     @group = group
@@ -74,7 +74,7 @@ class SimpleLoader < GraphQL::BreadthExec::LazyLoader
   end
 end
 
-class DeferredHashResolver < GraphQL::BreadthExec::FieldResolver
+class DeferredHashResolver < GraphQL::Breadth::FieldResolver
   def initialize(key)
     @key = key
   end
@@ -105,45 +105,45 @@ class SimpleHashBatchLoader < GraphQL::Batch::Loader
 end
 
 BREADTH_RESOLVERS = {
-  **GraphQL::BreadthExec::Introspection::TYPE_RESOLVERS,
+  **GraphQL::Breadth::Introspection::TYPE_RESOLVERS,
   "Node" => {
-    "id" => GraphQL::BreadthExec::HashKeyResolver.new("id"),
+    "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
     "__type__" => ->(obj, ctx) { ctx.types.type(obj["__typename__"]) },
   },
   "HasMetafields" => {
-    "metafield" => GraphQL::BreadthExec::HashKeyResolver.new("metafield"),
+    "metafield" => GraphQL::Breadth::HashKeyResolver.new("metafield"),
     "__type__" => ->(obj, ctx) { ctx.types.type(obj["__typename__"]) },
   },
   "Metafield" => {
-    "key" => GraphQL::BreadthExec::HashKeyResolver.new("key"),
-    "value" => GraphQL::BreadthExec::HashKeyResolver.new("value"),
+    "key" => GraphQL::Breadth::HashKeyResolver.new("key"),
+    "value" => GraphQL::Breadth::HashKeyResolver.new("value"),
   },
   "Product" => {
-    "id" => GraphQL::BreadthExec::HashKeyResolver.new("id"),
-    "title" => GraphQL::BreadthExec::HashKeyResolver.new("title"),
-    "maybe" => GraphQL::BreadthExec::HashKeyResolver.new("maybe"),
-    "must" => GraphQL::BreadthExec::HashKeyResolver.new("must"),
-    "variants" => GraphQL::BreadthExec::HashKeyResolver.new("variants"),
-    "metafield" => GraphQL::BreadthExec::HashKeyResolver.new("metafield"),
+    "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
+    "title" => GraphQL::Breadth::HashKeyResolver.new("title"),
+    "maybe" => GraphQL::Breadth::HashKeyResolver.new("maybe"),
+    "must" => GraphQL::Breadth::HashKeyResolver.new("must"),
+    "variants" => GraphQL::Breadth::HashKeyResolver.new("variants"),
+    "metafield" => GraphQL::Breadth::HashKeyResolver.new("metafield"),
   },
   "ProductConnection" => {
-    "nodes" => GraphQL::BreadthExec::HashKeyResolver.new("nodes"),
+    "nodes" => GraphQL::Breadth::HashKeyResolver.new("nodes"),
   },
   "Variant" => {
-    "id" => GraphQL::BreadthExec::HashKeyResolver.new("id"),
-    "title" => GraphQL::BreadthExec::HashKeyResolver.new("title"),
+    "id" => GraphQL::Breadth::HashKeyResolver.new("id"),
+    "title" => GraphQL::Breadth::HashKeyResolver.new("title"),
   },
   "VariantConnection" => {
-    "nodes" => GraphQL::BreadthExec::HashKeyResolver.new("nodes"),
+    "nodes" => GraphQL::Breadth::HashKeyResolver.new("nodes"),
   },
   "WriteValuePayload" => {
-    "value" => GraphQL::BreadthExec::HashKeyResolver.new("value"),
+    "value" => GraphQL::Breadth::HashKeyResolver.new("value"),
   },
   "Query" => {
-    **GraphQL::BreadthExec::Introspection::ENTRYPOINT_RESOLVERS,
-    "products" => GraphQL::BreadthExec::HashKeyResolver.new("products"),
-    "nodes" => GraphQL::BreadthExec::HashKeyResolver.new("nodes"),
-    "node" => GraphQL::BreadthExec::HashKeyResolver.new("node"),
+    **GraphQL::Breadth::Introspection::ENTRYPOINT_RESOLVERS,
+    "products" => GraphQL::Breadth::HashKeyResolver.new("products"),
+    "nodes" => GraphQL::Breadth::HashKeyResolver.new("nodes"),
+    "node" => GraphQL::Breadth::HashKeyResolver.new("node"),
   },
   "Mutation" => {
     "writeValue" => WriteValueResolver.new,
