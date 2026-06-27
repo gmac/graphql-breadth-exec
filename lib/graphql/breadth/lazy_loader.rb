@@ -5,6 +5,10 @@ module GraphQL
   module Breadth
     #: [ContextType < GraphQL::Query::Context]
     class LazyLoader
+      ConcurrencySettings = Data.define(:enabled, :limit, :resource, :timeout) do
+        alias_method :enabled?, :enabled
+      end
+
       class LazyFulfillment
         #: Executor::LazyElement
         attr_reader :element
@@ -44,6 +48,32 @@ module GraphQL
       end
 
       KEY_OMISSION = Object.new.freeze
+      DEFAULT_CONCURRENCY_SETTINGS = ConcurrencySettings.new(
+        enabled: false,
+        limit: nil,
+        resource: nil,
+        timeout: nil,
+      ).freeze
+
+      class << self
+        #: (?limit: Integer?, ?resource: untyped, ?timeout: Numeric?) -> void
+        def concurrency(limit: 8, resource: nil, timeout: nil)
+          raise ArgumentError, "Lazy concurrency limit must be positive" unless limit.nil? || limit > 0
+          raise ArgumentError, "Lazy concurrency timeout must be positive" unless timeout.nil? || timeout > 0
+
+          @concurrency_settings = ConcurrencySettings.new(
+            enabled: true,
+            limit: limit,
+            resource: resource || self,
+            timeout: timeout,
+          ).freeze
+        end
+
+        #: -> ConcurrencySettings
+        def concurrency_settings
+          @concurrency_settings || DEFAULT_CONCURRENCY_SETTINGS
+        end
+      end
 
       #: Hash[untyped, untyped]
       attr_reader :pending_keys_by_identity
@@ -69,6 +99,11 @@ module GraphQL
       #: -> bool
       def resolve_one?
         false
+      end
+
+      #: -> ConcurrencySettings
+      def concurrency_settings
+        self.class.concurrency_settings
       end
 
       #: (Array[untyped], ContextType) -> void

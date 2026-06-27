@@ -369,6 +369,31 @@ class MapLoader < GraphQL::Breadth::LazyLoader
 end
 ```
 
+### Lazy concurrency
+
+Lazy loaders run sequentially by default. A loader can opt into fiber-based concurrent execution when its work benefits from scheduler-aware I/O:
+
+```ruby
+# config/initializers/graphql_breadth.rb
+GraphQL::Breadth.enable_async!
+
+class RemoteInventoryLoader < GraphQL::Breadth::LazyLoader
+  concurrency limit: 4, resource: :inventory_api, timeout: 2
+
+  def perform(keys, context)
+    client = context[:inventory_client]
+
+    keys.each do |key|
+      fulfill_key(key, client.fetch_inventory(key))
+    end
+  end
+end
+```
+
+Concurrency-enabled loaders are scheduled as whole loader batches within the same lazy wave. Loaders that do not call `concurrency` keep the normal sequential behavior and do not enter the async scheduler. Call `GraphQL::Breadth.enable_async!` once during application boot before using lazy concurrency. Use this only for I/O that cooperates with Ruby's fiber scheduler; CPU work and blocking clients will still block the executing thread.
+
+`limit` bounds concurrent loader batches for the same `resource`, which defaults to the loader class. Use a shared `resource` to coordinate limits across related loaders that hit the same upstream resource.
+
 ### LazyLoader keys vs identities
 
 Lazy loaders support passing any complex object as loader keys. These complex objects can be reduced to a primitive identity within the loader's internal mapping table using the `identity_for` hook:

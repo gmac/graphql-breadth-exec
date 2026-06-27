@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
   spec.homepage      = 'https://github.com/gmac/graphql-breadth'
   spec.license       = 'MIT'
 
-  spec.required_ruby_version = '>= 2.7.0'
+  spec.required_ruby_version = '>= 3.2.0'
 
   spec.metadata    = {
     'homepage_uri' => 'https://github.com/gmac/graphql-breadth',
@@ -27,6 +27,7 @@ Gem::Specification.new do |spec|
 
   spec.add_runtime_dependency 'graphql', '>= 2.0'
   spec.add_runtime_dependency 'ostruct'
+  spec.add_runtime_dependency 'async', '~> 2.0'
 
   spec.add_development_dependency 'bundler', '~> 2.0'
   spec.add_development_dependency 'rake', '~> 12.0'

@@ -11,6 +11,7 @@ require_relative "./executor/execution_planner"
 require_relative "./executor/input_formatter"
 require_relative "./executor/error_formatter"
 require_relative "./executor/path_formatter"
+require_relative "./executor/async_lazy_execution"
 
 module GraphQL
   module Breadth
@@ -22,6 +23,9 @@ module GraphQL
       EMPTY_OBJECT = {}.freeze
       UNDEFINED = Util::NilLike.new("undefined")
       EMPTY_TIMER = 0.0
+      LazyJob = Data.define(:loader, :elements, :error)
+
+      include AsyncLazyExecution
 
       #: GraphQL::Query
       attr_reader :query
@@ -455,13 +459,13 @@ module GraphQL
       #: (Array[LazyElement]) -> void
       def execute_lazy(lazy_elements)
         aborted_status_cache = Hash.new { |h, exec_scope| h[exec_scope] = exec_scope.aborted_subtree? }.compare_by_identity
-        pending_loaders = (@loader_cache || EMPTY_OBJECT).each_value.reject { _1.promised.empty? }
+        pending_loader_count = 0
+        pending_jobs = []
 
-        if pending_loaders.empty?
-          raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
-        end
+        (@loader_cache || EMPTY_OBJECT).each_value do |loader|
+          next if loader.promised.empty?
 
-        pending_loaders.each do |loader|
+          pending_loader_count += 1
           loader_elements = loader.promised.map(&:element)
           all_aborted = loader_elements.all? do |element|
             aborted_status_cache[element.is_a?(ExecutionField) ? element.scope : element]
@@ -469,39 +473,95 @@ module GraphQL
 
           if all_aborted
             loader.reset!
-            next
-          end
-
-          lazy_start_time = EMPTY_TIMER
-          begin
-            unless @tracers.empty?
-              lazy_start_time = timer
-              @tracers.each { _1.before_lazy_set(loader, loader_elements, @context) }
-            end
-            loader.execute!(@context)
-          rescue StandardError => e
-            handled_error = handle_or_reraise(e)
-            loader_elements.each do |element|
-              case element
-              when ExecutionField
-                field_error = ExecutionError.from(handled_error, exec_field: element)
-                element.result = element.resolve_all(field_error)
-              when ExecutionScope
-                scope_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
-                element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
-                element.abort!
-              end
-            end
-          ensure
-            unless @tracers.empty?
-              duration = timer(lazy_start_time)
-              @tracers.each { _1.after_lazy_set(loader, loader_elements, @context, duration:) }
-            end
+          else
+            pending_jobs << LazyJob.new(loader: loader, elements: loader_elements, error: nil)
           end
         end
 
+        if pending_loader_count.zero?
+          raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
+        end
+
+        if pending_jobs.empty?
+          resume_lazy_elements(lazy_elements, aborted_status_cache)
+          return
+        end
+
+        sync_jobs, async_jobs = partition_lazy_jobs(pending_jobs)
+
+        if async_jobs
+          execute_async_lazy_jobs(sync_jobs || EMPTY_ARRAY, async_jobs, aborted_status_cache)
+        else
+          sync_jobs&.each { execute_lazy_job(_1) }
+          resume_lazy_elements(lazy_elements, aborted_status_cache)
+        end
+      end
+
+      #: (Array[LazyJob]) -> [Array[LazyJob]?, Array[LazyJob]?]
+      def partition_lazy_jobs(jobs)
+        sync_jobs = nil #: Array[LazyJob]?
+        async_jobs = nil #: Array[LazyJob]?
+        jobs.each do |job|
+          if job.loader.concurrency_settings.enabled?
+            (async_jobs ||= []) << job
+          else
+            (sync_jobs ||= []) << job
+          end
+        end
+        [sync_jobs, async_jobs]
+      end
+
+      #: (LazyJob, ?apply_errors: bool) -> StandardError?
+      def execute_lazy_job(job, apply_errors: true)
+        loader = job.loader
+        lazy_start_time = EMPTY_TIMER
+
+        begin
+          unless @tracers.empty?
+            lazy_start_time = timer
+            @tracers.each { _1.before_lazy_set(loader, job.elements, @context) }
+          end
+
+          loader.execute!(@context)
+          nil
+        rescue StandardError => e
+          if apply_errors
+            apply_lazy_loader_error(job, e)
+            nil
+          else
+            e
+          end
+        ensure
+          unless @tracers.empty?
+            duration = timer(lazy_start_time)
+            @tracers.each { _1.after_lazy_set(loader, job.elements, @context, duration:) }
+          end
+        end
+      end
+
+      #: (LazyJob, StandardError) -> void
+      def apply_lazy_loader_error(job, error)
+        handled_error = handle_or_reraise(error)
+
+        job.elements.each do |element|
+          case element
+          when ExecutionField
+            field_error = ExecutionError.from(handled_error, exec_field: element)
+            element.result = element.resolve_all(field_error)
+          when ExecutionScope
+            scope_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
+            element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
+            element.abort!
+          end
+        end
+      end
+
+      #: (Array[LazyElement], Hash[ExecutionScope, bool], ?capture_requeued: bool) -> Array[LazyElement]
+      def resume_lazy_elements(elements, aborted_status_cache, capture_requeued: false)
+        queue_start = @lazy_queue.length
         aborted_status_cache.clear
-        lazy_elements.each do |element|
+
+        elements.each do |element|
           case element
           when ExecutionField
             next if aborted_status_cache[element.scope]
@@ -517,6 +577,10 @@ module GraphQL
             resume_lazy_scope_execute(element)
           end
         end
+
+        return EMPTY_ARRAY unless capture_requeued && @lazy_queue.length > queue_start
+
+        @lazy_queue.slice!(queue_start, @lazy_queue.length - queue_start)
       end
 
       #: (ExecutionScope) -> void
