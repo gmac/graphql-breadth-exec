@@ -457,42 +457,11 @@ module GraphQL
       #: (Array[LazyElement]) -> void
       def execute_lazy(lazy_elements)
         aborted_status_cache = Hash.new { |h, exec_scope| h[exec_scope] = exec_scope.aborted_subtree? }.compare_by_identity
-        pending_jobs, has_pending_loaders = pending_lazy_loader_jobs(aborted_status_cache)
-
-        unless has_pending_loaders
-          raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
-        end
-
-        if pending_jobs.empty?
-          resume_lazy_elements(lazy_elements, aborted_status_cache)
-          return
-        end
-
-        sync_jobs = nil #: Array[LazyLoaderJob]?
-        async_jobs = nil #: Array[LazyLoaderJob]?
-        pending_jobs.each do |job|
-          if job.loader.concurrency_config.enabled
-            (async_jobs ||= []) << job
-          else
-            (sync_jobs ||= []) << job
-          end
-        end
-
-        if async_jobs
-          execute_concurrency_loader_jobs(sync_jobs || EMPTY_ARRAY, async_jobs, aborted_status_cache)
-        else
-          sync_jobs&.each { execute_lazy_loader_job(_1) }
-          resume_lazy_elements(lazy_elements, aborted_status_cache)
-        end
-      end
-
-      #: (Hash[ExecutionScope, bool], ?Hash[LazyLoader[untyped], bool]?) -> [Array[LazyLoaderJob], bool]
-      def pending_lazy_loader_jobs(aborted_status_cache, active_loaders = nil)
         pending_loader_count = 0
         pending_jobs = []
 
         (@loader_cache || EMPTY_OBJECT).each_value do |loader|
-          next if loader.promised.empty? || active_loaders&.key?(loader)
+          next if loader.promised.empty?
 
           pending_loader_count += 1
           loader_elements = loader.promised.map(&:element)
@@ -507,7 +476,23 @@ module GraphQL
           end
         end
 
-        [pending_jobs, pending_loader_count.positive?]
+        unless pending_loader_count.positive?
+          raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
+        end
+
+        if pending_jobs.empty?
+          resume_lazy_elements(lazy_elements, aborted_status_cache)
+          return
+        end
+
+        sync_jobs, async_jobs = split_lazy_loader_jobs(pending_jobs)
+
+        if async_jobs
+          execute_async_lazy_jobs(sync_jobs || EMPTY_ARRAY, async_jobs, aborted_status_cache)
+        else
+          sync_jobs&.each { execute_lazy_job(_1) }
+          resume_lazy_elements(lazy_elements, aborted_status_cache)
+        end
       end
 
       #: (Array[LazyLoaderJob]) -> [Array[LazyLoaderJob]?, Array[LazyLoaderJob]?]
@@ -524,35 +509,8 @@ module GraphQL
         [sync_jobs, async_jobs]
       end
 
-      #: (Array[LazyElement], Hash[ExecutionScope, bool], ?capture_requeued: bool) -> Array[LazyElement]
-      def resume_lazy_elements(elements, aborted_status_cache, capture_requeued: false)
-        queue_start = @lazy_queue.length
-        aborted_status_cache.clear
-
-        elements.each do |element|
-          case element
-          when ExecutionField
-            next if aborted_status_cache[element.scope]
-
-            if element.has_result?
-              resume_lazy_field_result(element)
-            else
-              resume_lazy_field_execute(element)
-            end
-          when ExecutionScope
-            next if aborted_status_cache[element]
-
-            resume_lazy_scope_execute(element)
-          end
-        end
-
-        return EMPTY_ARRAY unless capture_requeued && @lazy_queue.length > queue_start
-
-        @lazy_queue.slice!(queue_start, @lazy_queue.length - queue_start)
-      end
-
       #: (LazyLoaderJob, ?apply_errors: bool) -> StandardError?
-      def execute_lazy_loader_job(job, apply_errors: true)
+      def execute_lazy_job(job, apply_errors: true)
         loader = job.loader
         lazy_start_time = EMPTY_TIMER
 
@@ -580,7 +538,7 @@ module GraphQL
       end
 
       #: (Array[LazyLoaderJob], Array[LazyLoaderJob], Hash[ExecutionScope, bool]) -> void
-      def execute_concurrency_loader_jobs(sync_jobs, async_jobs, aborted_status_cache)
+      def execute_async_lazy_jobs(sync_jobs, async_jobs, aborted_status_cache)
         unless GraphQL::Breadth.async_enabled?
           raise ImplementationError, "Async lazy loaders require `GraphQL::Breadth.enable_async!` during application boot."
         end
@@ -622,9 +580,9 @@ module GraphQL
             parent.async do |async_task|
               error = begin
                 if config.timeout
-                  async_task.with_timeout(config.timeout) { execute_lazy_loader_job(job, apply_errors: false) }
+                  async_task.with_timeout(config.timeout) { execute_lazy_job(job, apply_errors: false) }
                 else
-                  execute_lazy_loader_job(job, apply_errors: false)
+                  execute_lazy_job(job, apply_errors: false)
                 end
               rescue Exception => e
                 e
@@ -638,14 +596,29 @@ module GraphQL
           schedule_pending_jobs = -> { EMPTY_OBJECT }
 
           execute_sync_job = lambda do |job|
-            error = execute_lazy_loader_job(job, apply_errors: false)
+            error = execute_lazy_job(job, apply_errors: false)
             apply_lazy_loader_error(job, error) if error
             requeued_elements = resume_lazy_elements(job.elements, aborted_status_cache, capture_requeued: true)
             drain_requeued_elements.call(requeued_elements)
           end
 
           schedule_pending_jobs = lambda do
-            pending_jobs, = pending_lazy_loader_jobs(aborted_status_cache, active_loaders)
+            pending_jobs = []
+            (@loader_cache || EMPTY_OBJECT).each_value do |loader|
+              next if loader.promised.empty? || active_loaders.key?(loader)
+
+              loader_elements = loader.promised.map(&:element)
+              all_aborted = loader_elements.all? do |element|
+                aborted_status_cache[element.is_a?(ExecutionField) ? element.scope : element]
+              end
+
+              if all_aborted
+                loader.reset!
+              else
+                pending_jobs << LazyLoaderJob.new(loader: loader, elements: loader_elements)
+              end
+            end
+
             return EMPTY_OBJECT if pending_jobs.empty?
 
             scheduled_elements = {}.compare_by_identity
@@ -723,6 +696,33 @@ module GraphQL
             element.abort!
           end
         end
+      end
+
+      #: (Array[LazyElement], Hash[ExecutionScope, bool], ?capture_requeued: bool) -> Array[LazyElement]
+      def resume_lazy_elements(elements, aborted_status_cache, capture_requeued: false)
+        queue_start = @lazy_queue.length
+        aborted_status_cache.clear
+
+        elements.each do |element|
+          case element
+          when ExecutionField
+            next if aborted_status_cache[element.scope]
+
+            if element.has_result?
+              resume_lazy_field_result(element)
+            else
+              resume_lazy_field_execute(element)
+            end
+          when ExecutionScope
+            next if aborted_status_cache[element]
+
+            resume_lazy_scope_execute(element)
+          end
+        end
+
+        return EMPTY_ARRAY unless capture_requeued && @lazy_queue.length > queue_start
+
+        @lazy_queue.slice!(queue_start, @lazy_queue.length - queue_start)
       end
 
       #: (ExecutionScope) -> void
