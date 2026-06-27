@@ -322,7 +322,7 @@ class GraphQL::Breadth::Executor::LoadersTest < Minitest::Test
     executor_class = Class.new(GraphQL::Breadth::Executor) do
       private
 
-      def execute_concurrency_loader_jobs(*)
+      def execute_async_lazy_jobs(*)
         raise "Async scheduler should not run for sync lazy loaders"
       end
     end

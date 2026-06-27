@@ -5,7 +5,9 @@ module GraphQL
   module Breadth
     #: [ContextType < GraphQL::Query::Context]
     class LazyLoader
-      ConcurrencyConfig = Data.define(:enabled, :backend, :limit, :resource, :timeout)
+      ConcurrencySettings = Data.define(:enabled, :limit, :resource, :timeout) do
+        alias_method :enabled?, :enabled
+      end
 
       class LazyFulfillment
         #: Executor::LazyElement
@@ -46,33 +48,30 @@ module GraphQL
       end
 
       KEY_OMISSION = Object.new.freeze
-      DEFAULT_CONCURRENCY_CONFIG = ConcurrencyConfig.new(
+      DEFAULT_CONCURRENCY_SETTINGS = ConcurrencySettings.new(
         enabled: false,
-        backend: :sync,
         limit: nil,
         resource: nil,
         timeout: nil,
       ).freeze
 
       class << self
-        #: (?backend: Symbol, ?limit: Integer?, ?resource: untyped, ?timeout: Numeric?) -> void
-        def concurrency(backend: :async, limit: 8, resource: nil, timeout: nil)
-          raise ArgumentError, "Unsupported lazy concurrency backend: #{backend.inspect}" unless backend == :async
-          raise ArgumentError, "Lazy concurrency limit must be positive" unless limit.nil? || limit.positive?
-          raise ArgumentError, "Lazy concurrency timeout must be positive" unless timeout.nil? || (timeout.respond_to?(:positive?) && timeout.positive?)
+        #: (?limit: Integer?, ?resource: untyped, ?timeout: Numeric?) -> void
+        def concurrency(limit: 8, resource: nil, timeout: nil)
+          raise ArgumentError, "Lazy concurrency limit must be positive" unless limit.nil? || limit > 0
+          raise ArgumentError, "Lazy concurrency timeout must be positive" unless timeout.nil? || timeout > 0
 
-          @concurrency_config = ConcurrencyConfig.new(
+          @concurrency_settings = ConcurrencySettings.new(
             enabled: true,
-            backend: backend,
             limit: limit,
             resource: resource || self,
             timeout: timeout,
           ).freeze
         end
 
-        #: -> ConcurrencyConfig
-        def concurrency_config
-          @concurrency_config || DEFAULT_CONCURRENCY_CONFIG
+        #: -> ConcurrencySettings
+        def concurrency_settings
+          @concurrency_settings || DEFAULT_CONCURRENCY_SETTINGS
         end
       end
 
@@ -102,9 +101,9 @@ module GraphQL
         false
       end
 
-      #: -> ConcurrencyConfig
-      def concurrency_config
-        self.class.concurrency_config
+      #: -> ConcurrencySettings
+      def concurrency_settings
+        self.class.concurrency_settings
       end
 
       #: (Array[untyped], ContextType) -> void
