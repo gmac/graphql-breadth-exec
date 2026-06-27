@@ -22,6 +22,8 @@ module GraphQL
       EMPTY_OBJECT = {}.freeze
       UNDEFINED = Util::NilLike.new("undefined")
       EMPTY_TIMER = 0.0
+      LazyLoaderJob = Data.define(:loader, :elements)
+      LazyLoaderJobResult = Data.define(:job, :error)
 
       #: GraphQL::Query
       attr_reader :query
@@ -455,13 +457,44 @@ module GraphQL
       #: (Array[LazyElement]) -> void
       def execute_lazy(lazy_elements)
         aborted_status_cache = Hash.new { |h, exec_scope| h[exec_scope] = exec_scope.aborted_subtree? }.compare_by_identity
-        pending_loaders = (@loader_cache || EMPTY_OBJECT).each_value.reject { _1.promised.empty? }
+        pending_jobs, has_pending_loaders = pending_lazy_loader_jobs(aborted_status_cache)
 
-        if pending_loaders.empty?
+        unless has_pending_loaders
           raise ImplementationError, "Lazy #{lazy_elements.first} produced a promise without a loader"
         end
 
-        pending_loaders.each do |loader|
+        if pending_jobs.empty?
+          resume_lazy_elements(lazy_elements, aborted_status_cache)
+          return
+        end
+
+        sync_jobs = nil #: Array[LazyLoaderJob]?
+        async_jobs = nil #: Array[LazyLoaderJob]?
+        pending_jobs.each do |job|
+          if job.loader.concurrency_config.enabled
+            (async_jobs ||= []) << job
+          else
+            (sync_jobs ||= []) << job
+          end
+        end
+
+        if async_jobs
+          execute_concurrency_loader_jobs(sync_jobs || EMPTY_ARRAY, async_jobs, aborted_status_cache)
+        else
+          sync_jobs&.each { execute_lazy_loader_job(_1) }
+          resume_lazy_elements(lazy_elements, aborted_status_cache)
+        end
+      end
+
+      #: (Hash[ExecutionScope, bool], ?Hash[LazyLoader[untyped], bool]?) -> [Array[LazyLoaderJob], bool]
+      def pending_lazy_loader_jobs(aborted_status_cache, active_loaders = nil)
+        pending_loader_count = 0
+        pending_jobs = []
+
+        (@loader_cache || EMPTY_OBJECT).each_value do |loader|
+          next if loader.promised.empty? || active_loaders&.key?(loader)
+
+          pending_loader_count += 1
           loader_elements = loader.promised.map(&:element)
           all_aborted = loader_elements.all? do |element|
             aborted_status_cache[element.is_a?(ExecutionField) ? element.scope : element]
@@ -469,39 +502,34 @@ module GraphQL
 
           if all_aborted
             loader.reset!
-            next
-          end
-
-          lazy_start_time = EMPTY_TIMER
-          begin
-            unless @tracers.empty?
-              lazy_start_time = timer
-              @tracers.each { _1.before_lazy_set(loader, loader_elements, @context) }
-            end
-            loader.execute!(@context)
-          rescue StandardError => e
-            handled_error = handle_or_reraise(e)
-            loader_elements.each do |element|
-              case element
-              when ExecutionField
-                field_error = ExecutionError.from(handled_error, exec_field: element)
-                element.result = element.resolve_all(field_error)
-              when ExecutionScope
-                scope_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
-                element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
-                element.abort!
-              end
-            end
-          ensure
-            unless @tracers.empty?
-              duration = timer(lazy_start_time)
-              @tracers.each { _1.after_lazy_set(loader, loader_elements, @context, duration:) }
-            end
+          else
+            pending_jobs << LazyLoaderJob.new(loader: loader, elements: loader_elements)
           end
         end
 
+        [pending_jobs, pending_loader_count.positive?]
+      end
+
+      #: (Array[LazyLoaderJob]) -> [Array[LazyLoaderJob]?, Array[LazyLoaderJob]?]
+      def split_lazy_loader_jobs(jobs)
+        sync_jobs = nil #: Array[LazyLoaderJob]?
+        async_jobs = nil #: Array[LazyLoaderJob]?
+        jobs.each do |job|
+          if job.loader.concurrency_config.enabled
+            (async_jobs ||= []) << job
+          else
+            (sync_jobs ||= []) << job
+          end
+        end
+        [sync_jobs, async_jobs]
+      end
+
+      #: (Array[LazyElement], Hash[ExecutionScope, bool], ?capture_requeued: bool) -> Array[LazyElement]
+      def resume_lazy_elements(elements, aborted_status_cache, capture_requeued: false)
+        queue_start = @lazy_queue.length
         aborted_status_cache.clear
-        lazy_elements.each do |element|
+
+        elements.each do |element|
           case element
           when ExecutionField
             next if aborted_status_cache[element.scope]
@@ -515,6 +543,184 @@ module GraphQL
             next if aborted_status_cache[element]
 
             resume_lazy_scope_execute(element)
+          end
+        end
+
+        return EMPTY_ARRAY unless capture_requeued && @lazy_queue.length > queue_start
+
+        @lazy_queue.slice!(queue_start, @lazy_queue.length - queue_start)
+      end
+
+      #: (LazyLoaderJob, ?apply_errors: bool) -> StandardError?
+      def execute_lazy_loader_job(job, apply_errors: true)
+        loader = job.loader
+        lazy_start_time = EMPTY_TIMER
+
+        begin
+          unless @tracers.empty?
+            lazy_start_time = timer
+            @tracers.each { _1.before_lazy_set(loader, job.elements, @context) }
+          end
+
+          loader.execute!(@context)
+          nil
+        rescue StandardError => e
+          if apply_errors
+            apply_lazy_loader_error(job, e)
+            nil
+          else
+            e
+          end
+        ensure
+          unless @tracers.empty?
+            duration = timer(lazy_start_time)
+            @tracers.each { _1.after_lazy_set(loader, job.elements, @context, duration:) }
+          end
+        end
+      end
+
+      #: (Array[LazyLoaderJob], Array[LazyLoaderJob], Hash[ExecutionScope, bool]) -> void
+      def execute_concurrency_loader_jobs(sync_jobs, async_jobs, aborted_status_cache)
+        unless GraphQL::Breadth.async_enabled?
+          raise ImplementationError, "Async lazy loaders require `GraphQL::Breadth.enable_async!` during application boot."
+        end
+
+        Sync do |task|
+          barrier = Async::Barrier.new(parent: task)
+          completed_jobs = Async::Queue.new
+          active_loaders = {}.compare_by_identity
+          active_count = 0
+          waiting_elements = []
+          waiting_elements_by_identity = {}.compare_by_identity
+          semaphores_by_resource = {}
+
+          enqueue_waiting_elements = lambda do |elements|
+            elements.each do |element|
+              next if waiting_elements_by_identity.key?(element)
+
+              waiting_elements_by_identity[element] = true
+              waiting_elements << element
+            end
+          end
+
+          schedule_async_job = lambda do |job|
+            config = job.loader.concurrency_config
+            unless config.backend == :async
+              raise ImplementationError, "Unsupported lazy concurrency backend: #{config.backend.inspect}"
+            end
+
+            limit = config.limit
+            parent = if limit
+              semaphores_by_resource[config.resource] ||= Async::Semaphore.new(limit, parent: barrier)
+            else
+              barrier
+            end
+
+            active_loaders[job.loader] = true
+            active_count += 1
+
+            parent.async do |async_task|
+              error = begin
+                if config.timeout
+                  async_task.with_timeout(config.timeout) { execute_lazy_loader_job(job, apply_errors: false) }
+                else
+                  execute_lazy_loader_job(job, apply_errors: false)
+                end
+              rescue Exception => e
+                e
+              end
+
+              completed_jobs << LazyLoaderJobResult.new(job: job, error: error)
+            end
+          end
+
+          drain_requeued_elements = ->(_elements) {}
+          schedule_pending_jobs = -> { EMPTY_OBJECT }
+
+          execute_sync_job = lambda do |job|
+            error = execute_lazy_loader_job(job, apply_errors: false)
+            apply_lazy_loader_error(job, error) if error
+            requeued_elements = resume_lazy_elements(job.elements, aborted_status_cache, capture_requeued: true)
+            drain_requeued_elements.call(requeued_elements)
+          end
+
+          schedule_pending_jobs = lambda do
+            pending_jobs, = pending_lazy_loader_jobs(aborted_status_cache, active_loaders)
+            return EMPTY_OBJECT if pending_jobs.empty?
+
+            scheduled_elements = {}.compare_by_identity
+            sync_pending_jobs, async_pending_jobs = split_lazy_loader_jobs(pending_jobs)
+            pending_jobs.each { |job| job.elements.each { scheduled_elements[_1] = true } }
+
+            async_pending_jobs&.each { schedule_async_job.call(_1) }
+            sync_pending_jobs&.each { execute_sync_job.call(_1) }
+
+            scheduled_elements
+          end
+
+          drain_requeued_elements = lambda do |elements|
+            return if elements.empty?
+
+            scheduled_elements = schedule_pending_jobs.call
+            if scheduled_elements.empty?
+              enqueue_waiting_elements.call(elements)
+            else
+              elements.each do |element|
+                enqueue_waiting_elements.call([element]) unless scheduled_elements.key?(element)
+              end
+            end
+          end
+
+          retry_waiting_elements = lambda do
+            return if waiting_elements.empty?
+
+            elements = waiting_elements
+            waiting_elements = []
+            waiting_elements_by_identity.clear
+            requeued_elements = resume_lazy_elements(elements, aborted_status_cache, capture_requeued: true)
+            drain_requeued_elements.call(requeued_elements)
+          end
+
+          begin
+            async_jobs.each { schedule_async_job.call(_1) }
+            sync_jobs.each { execute_sync_job.call(_1) }
+
+            until active_count.zero?
+              result = completed_jobs.dequeue
+              active_count -= 1
+              active_loaders.delete(result.job.loader)
+
+              if result.error
+                raise result.error unless result.error.is_a?(StandardError)
+
+                apply_lazy_loader_error(result.job, result.error)
+              end
+
+              requeued_elements = resume_lazy_elements(result.job.elements, aborted_status_cache, capture_requeued: true)
+              drain_requeued_elements.call(requeued_elements)
+              retry_waiting_elements.call
+            end
+
+            retry_waiting_elements.call
+          ensure
+            barrier.stop if active_count.positive?
+          end
+        end
+      end
+
+      #: (LazyLoaderJob, StandardError) -> void
+      def apply_lazy_loader_error(job, error)
+        handled_error = handle_or_reraise(error)
+
+        job.elements.each do |element|
+          case element
+          when ExecutionField
+            field_error = ExecutionError.from(handled_error, exec_field: element)
+            element.result = element.resolve_all(field_error)
+          when ExecutionScope
+            scope_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
+            element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
+            element.abort!
           end
         end
       end

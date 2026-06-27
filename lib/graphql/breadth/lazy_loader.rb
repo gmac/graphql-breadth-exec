@@ -5,6 +5,8 @@ module GraphQL
   module Breadth
     #: [ContextType < GraphQL::Query::Context]
     class LazyLoader
+      ConcurrencyConfig = Data.define(:enabled, :backend, :limit, :resource, :timeout)
+
       class LazyFulfillment
         #: Executor::LazyElement
         attr_reader :element
@@ -44,6 +46,35 @@ module GraphQL
       end
 
       KEY_OMISSION = Object.new.freeze
+      DEFAULT_CONCURRENCY_CONFIG = ConcurrencyConfig.new(
+        enabled: false,
+        backend: :sync,
+        limit: nil,
+        resource: nil,
+        timeout: nil,
+      ).freeze
+
+      class << self
+        #: (?backend: Symbol, ?limit: Integer?, ?resource: untyped, ?timeout: Numeric?) -> void
+        def concurrency(backend: :async, limit: 8, resource: nil, timeout: nil)
+          raise ArgumentError, "Unsupported lazy concurrency backend: #{backend.inspect}" unless backend == :async
+          raise ArgumentError, "Lazy concurrency limit must be positive" unless limit.nil? || limit.positive?
+          raise ArgumentError, "Lazy concurrency timeout must be positive" unless timeout.nil? || (timeout.respond_to?(:positive?) && timeout.positive?)
+
+          @concurrency_config = ConcurrencyConfig.new(
+            enabled: true,
+            backend: backend,
+            limit: limit,
+            resource: resource || self,
+            timeout: timeout,
+          ).freeze
+        end
+
+        #: -> ConcurrencyConfig
+        def concurrency_config
+          @concurrency_config || DEFAULT_CONCURRENCY_CONFIG
+        end
+      end
 
       #: Hash[untyped, untyped]
       attr_reader :pending_keys_by_identity
@@ -69,6 +100,11 @@ module GraphQL
       #: -> bool
       def resolve_one?
         false
+      end
+
+      #: -> ConcurrencyConfig
+      def concurrency_config
+        self.class.concurrency_config
       end
 
       #: (Array[untyped], ContextType) -> void
