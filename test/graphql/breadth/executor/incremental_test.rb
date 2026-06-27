@@ -46,20 +46,21 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       exec_field.map_objects { _1["nodes"] }
     end
 
-    def resolve_list_stream(objects, _ctx, state:, object_states:, limit:, iteration:, field:)
-      state[:calls] = @calls
+    def resolve_list_stream(field, _ctx)
+      field.state[:calls] = @calls
       @calls << {
-        limit:,
-        iteration:,
-        object_count: objects.length,
+        limit: field.limit,
+        iteration: field.iteration,
+        object_count: field.pending_entries.length,
         arguments: field.arguments,
       }
 
-      objects.map.with_index do |object, index|
+      field.pending_entries.map do |entry|
+        object = entry.object
         nodes = object.fetch("nodes")
-        object_state = object_states[index]
+        object_state = entry.object_state
         offset = object_state[:offset] || 0
-        page_size = limit || @page_size || nodes.length
+        page_size = field.limit || @page_size || nodes.length
         items = nodes.slice(offset, page_size) || []
         object_state[:offset] = offset + items.length
         complete = object_state[:offset] >= nodes.length
@@ -78,9 +79,9 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       exec_field.map_objects { _1["nodes"] }
     end
 
-    def resolve_list_stream(objects, _ctx, state:, object_states:, limit:, iteration:, field:)
+    def resolve_list_stream(field, _ctx)
       field
-        .lazy(loader_class: BatchTrackingLoader, keys: objects.map { [field.key, _1["nodes"]] })
+        .lazy(loader_class: BatchTrackingLoader, keys: field.pending_entries.map { [field.key, _1.object["nodes"]] })
         .then do |entries|
           entries.map do |(_field_key, nodes)|
             GraphQL::Breadth::ListStreamChunk.new(items: nodes, complete: true)
@@ -104,24 +105,25 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
       exec_field.map_objects { _1["nodes"] }
     end
 
-    def resolve_list_stream(objects, _ctx, state:, object_states:, limit:, iteration:, field:)
-      state[:calls] = @calls
+    def resolve_list_stream(field, _ctx)
+      field.state[:calls] = @calls
       @calls << {
-        limit:,
-        iteration:,
-        objects: objects.map { _1["name"] },
+        limit: field.limit,
+        iteration: field.iteration,
+        objects: field.pending_entries.map { _1.object["name"] },
         arguments: field.arguments,
       }
 
-      objects.map.with_index do |object, index|
+      field.pending_entries.map do |entry|
+        object = entry.object
         nodes = object.fetch("nodes")
-        object_state = object_states[index]
+        object_state = entry.object_state
         offset = object_state[:offset] || 0
-        page_size = limit || 1
+        page_size = field.limit || 1
         items = nodes.slice(offset, page_size) || []
         object_state[:offset] = offset + items.length
 
-        if iteration.zero?
+        if field.iteration.zero?
           GraphQL::Breadth::ListStreamChunk.new(items:, complete: false)
         else
           complete = object_state[:offset] >= nodes.length

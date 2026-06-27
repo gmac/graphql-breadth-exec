@@ -20,15 +20,10 @@ module GraphQL
       end
 
       #: (
-      #|   Array[untyped],
+      #|   Executor::ListStreamField,
       #|   GraphQL::Query::Context,
-      #|   state: Hash[untyped, untyped],
-      #|   object_states: Array[Hash[untyped, untyped]],
-      #|   limit: Integer?,
-      #|   iteration: Integer,
-      #|   field: Executor::ListStreamField,
       #| ) -> (Array[untyped] | Executor::ExecutionPromise)
-      def resolve_list_stream(_objects, _ctx, state:, object_states:, limit:, iteration:, field:)
+      def resolve_list_stream(_field, _ctx)
         raise NotImplementedError, "FieldResolver#resolve_list_stream must be implemented."
       end
 

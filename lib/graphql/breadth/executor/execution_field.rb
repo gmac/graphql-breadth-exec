@@ -207,7 +207,7 @@ module GraphQL
         #: () -> Incremental::StreamUsage?
         def stream_usage
           if @stream_usage.equal?(UNDEFINED)
-            @stream_usage = executor.incremental? && Util.unwrap_non_null(type).list? ? executor.planner.stream_usage_for(self) : nil
+            @stream_usage = executor.incremental? && type.list? ? executor.planner.stream_usage_for(self) : nil
           end
 
           @stream_usage

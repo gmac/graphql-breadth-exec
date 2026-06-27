@@ -734,13 +734,8 @@ module GraphQL
         stream_field.reset_for_resolve!(limit:)
         stream_field.lazy_state_executing!
         stream_field.result = exec_field.resolver.resolve_list_stream(
-          stream_field.objects,
+          stream_field,
           @context,
-          state: stream_field.state,
-          object_states: stream_field.object_states,
-          limit:,
-          iteration: stream_field.iteration,
-          field: stream_field,
         )
         stream_field.iteration += 1
 
