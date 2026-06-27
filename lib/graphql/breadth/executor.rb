@@ -5,6 +5,7 @@ require_relative "./executor/has_attributes"
 require_relative "./executor/lazy_element"
 require_relative "./executor/execution_scope"
 require_relative "./executor/execution_field"
+require_relative "./executor/list_stream_field"
 require_relative "./executor/execution_directive"
 require_relative "./executor/abstract_execution_scope"
 require_relative "./executor/execution_planner"
@@ -464,7 +465,7 @@ module GraphQL
         pending_loaders.each do |loader|
           loader_elements = loader.promised.map(&:element)
           all_aborted = loader_elements.all? do |element|
-            aborted_status_cache[element.is_a?(ExecutionField) ? element.scope : element]
+            aborted_status_cache[lazy_element_scope(element)]
           end
 
           if all_aborted
@@ -490,6 +491,9 @@ module GraphQL
                 scope_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
                 element.results.each { add_error(scope_error, _1, exec_field: element.parent_field) }
                 element.abort!
+              when ListStreamField
+                stream_error = ExecutionError.from(handled_error, exec_field: element.parent_field)
+                element.result = element.resolve_all(stream_error)
               end
             end
           ensure
@@ -515,8 +519,42 @@ module GraphQL
             next if aborted_status_cache[element]
 
             resume_lazy_scope_execute(element)
+          when ListStreamField
+            next if aborted_status_cache[element.parent_field.scope]
+
+            resume_lazy_list_stream_field(element)
           end
         end
+      end
+
+      #: (LazyElement) -> ExecutionScope
+      def lazy_element_scope(element)
+        case element
+        when ExecutionField
+          element.scope
+        when ListStreamField
+          element.parent_field.scope
+        when ExecutionScope
+          element
+        else
+          raise ImplementationError, "Unknown lazy element"
+        end
+      end
+
+      #: (ListStreamField) -> void
+      def resume_lazy_list_stream_field(list_stream_field)
+        if list_stream_field.lazy_result?
+          begin
+            promise = list_stream_field.result
+            if promise_resolved?(promise, element: list_stream_field)
+              list_stream_field.result = promise.value
+            end
+          rescue ExecutionError => e
+            list_stream_field.result = list_stream_field.resolve_all(e)
+          end
+        end
+
+        list_stream_field.lazy_state_locked! unless list_stream_field.locked?
       end
 
       #: (ExecutionScope) -> void
@@ -582,6 +620,8 @@ module GraphQL
             element
           when ExecutionScope
             element.parent_field
+          when ListStreamField
+            element.parent_field
           end
 
           raise handle_or_reraise(reason, exec_field:)
@@ -624,10 +664,10 @@ module GraphQL
           if !pre_authorized
             exec_field.result = exec_field.resolve_all(FieldAuthorizationError.new(exec_field: exec_field))
           elsif exec_field.directives.empty?
-            exec_field.result = exec_field.resolver.resolve(exec_field, @context)
+            exec_field.result = resolve_field(exec_field)
           else
             execute_with_directives(exec_field.directives, current_field: exec_field) do
-              exec_field.result = exec_field.resolver.resolve(exec_field, @context)
+              exec_field.result = resolve_field(exec_field)
             end
           end
         rescue StandardError => e
@@ -646,6 +686,99 @@ module GraphQL
           build_field_placeholder(exec_field)
         else
           build_field_result(exec_field, exec_field.result)
+        end
+      end
+
+      #: (ExecutionField[untyped]) -> (Array[untyped] | ExecutionPromise)
+      def resolve_field(exec_field)
+        if (exec_field.resolver.stream? && stream_usage = exec_field.stream_usage)
+          resolve_field_stream(exec_field, stream_usage)
+        else
+          exec_field.resolver.resolve(exec_field, @context)
+        end
+      end
+
+      #: (ExecutionField[untyped], Incremental::StreamUsage) -> (Array[untyped] | ExecutionPromise)
+      def resolve_field_stream(exec_field, stream_usage)
+        parent_objects = exec_field.objects
+        state = exec_field.attributes[:list_stream_state] ||= {}
+        object_states = Array.new(parent_objects.length) { {} } #: Array[Hash[untyped, untyped]]
+        pending_entries = parent_objects.map.with_index do |object, index|
+          object_state = object_states[index] #: as !nil
+          Incremental::ListStreamEntry.new(object:, object_state:)
+        end #: Array[Incremental::ListStreamEntry]
+        stream_field = ListStreamField.new(
+          parent_field: exec_field,
+          pending_entries:,
+          state:,
+          limit: stream_usage.initial_count,
+        )
+        pending_entries.each { _1.field = stream_field }
+
+        if stream_usage.initial_count.zero?
+          chunks = Array.new(parent_objects.length) { ListStreamChunk.new(items: EMPTY_ARRAY, complete: false) }
+          return build_list_stream_sources(stream_field, chunks)
+        end
+
+        result = resolve_list_stream_chunks(stream_field, limit: stream_usage.initial_count)
+        if result.is_a?(ExecutionPromise)
+          result.then { |chunks| build_list_stream_sources(stream_field, chunks) }
+        else
+          build_list_stream_sources(stream_field, result)
+        end
+      end
+
+      #: (ListStreamField, limit: Integer?) -> (Array[untyped] | ExecutionPromise)
+      def resolve_list_stream_chunks(stream_field, limit:)
+        exec_field = stream_field.parent_field
+        stream_field.reset_for_resolve!(limit:)
+        stream_field.lazy_state_executing!
+        stream_field.result = exec_field.resolver.resolve_list_stream(
+          stream_field,
+          @context,
+        )
+        stream_field.iteration += 1
+
+        stream_field.lazy_state_locked! unless stream_field.lazy_result?
+
+        stream_field.result
+      end
+
+      #: (ListStreamField, Array[untyped]) -> Array[untyped]
+      def build_list_stream_sources(stream_field, chunks)
+        entries = stream_field.pending_entries
+        exec_field = stream_field.parent_field
+        unless chunks.length == entries.length
+          handle_or_reraise(ResultCountMismatchError.new(
+            exec_field: exec_field,
+            expected_count: entries.length,
+            actual_count: chunks.length,
+          ))
+          chunks = Array.new(entries.length)
+        end
+
+        chunks.each_with_index.map do |chunk, index|
+          next chunk if chunk.is_a?(StandardError)
+
+          items, complete = normalize_list_stream_chunk(exec_field, chunk)
+          entry = entries[index] #: as !nil
+          remaining_items = entry unless complete
+          stream_field.drop_pending_entries([entry]) if complete
+          Incremental::ListStreamSource.new(initial_items: items, remaining_items:)
+        end
+      end
+
+      #: (ExecutionField[untyped], untyped) -> [Array[untyped], bool]
+      def normalize_list_stream_chunk(exec_field, chunk)
+        case chunk
+        when ListStreamChunk
+          [chunk.items, chunk.complete?]
+        when Array
+          [chunk, chunk.empty?]
+        when nil
+          [EMPTY_ARRAY, true]
+        else
+          raise InvalidListResultError.new(exec_field:, result_type: chunk.class)
         end
       end
 
@@ -676,6 +809,7 @@ module GraphQL
         field_key = exec_field.key
         field_type = exec_field.type
         return_type = field_type.unwrap
+        stream_usage = exec_field.stream_usage
 
         if resolved_objects.length != parent_objects.length
           handle_or_reraise(ResultCountMismatchError.new(
@@ -693,7 +827,11 @@ module GraphQL
           i = 0
           while i < resolved_objects.length
             object = resolved_objects[i]
-            parent_results[i][field_key] = build_and_flatmap_composite_result(exec_field, field_type, object, next_objects, next_results)
+            parent_results[i][field_key] = if stream_usage
+              build_streaming_composite_result(exec_field, field_type, object, next_objects, next_results, stream_usage, i)
+            else
+              build_and_flatmap_composite_result(exec_field, field_type, object, next_objects, next_results)
+            end
             i += 1
           end
 
@@ -712,7 +850,11 @@ module GraphQL
           i = 0
           while i < resolved_objects.length
             val = resolved_objects[i]
-            parent_results[i][field_key] = build_leaf_result(exec_field, field_type, val)
+            parent_results[i][field_key] = if stream_usage
+              build_streaming_leaf_result(exec_field, field_type, val, stream_usage, i)
+            else
+              build_leaf_result(exec_field, field_type, val)
+            end
             i += 1
           end
         end
@@ -725,6 +867,226 @@ module GraphQL
           duration = timer(start_time)
           @tracers.each { _1.after_build_field_result(exec_field, @context, duration:) }
         end
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   untyped current_type,
+      #|   untyped object,
+      #|   Array[untyped] next_objects,
+      #|   Array[Hash[String, untyped]] next_results,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #| ) -> untyped
+      def build_streaming_composite_result(exec_field, current_type, object, next_objects, next_results, stream_usage, object_index)
+        return build_and_flatmap_composite_result(exec_field, current_type, object, next_objects, next_results) if object.nil? || object.is_a?(StandardError)
+        return build_and_flatmap_composite_result(exec_field, current_type, object, next_objects, next_results) unless Util.unwrap_non_null(current_type).list?
+
+        initial_count = stream_usage.initial_count
+        item_type = Util.unwrap_non_null(current_type).of_type
+        initial_items, remaining_items, register_stream = split_stream_items(exec_field, object, initial_count)
+
+        initial_result = initial_items.map do |src|
+          build_and_flatmap_composite_result(exec_field, item_type, src, next_objects, next_results)
+        end
+
+        if register_stream
+          register_composite_stream_scope(
+            exec_field,
+            item_type,
+            stream_usage,
+            object_index,
+            remaining_items,
+            initial_items.length,
+          )
+        end
+
+        initial_result
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   untyped current_type,
+      #|   untyped val,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #| ) -> untyped
+      def build_streaming_leaf_result(exec_field, current_type, val, stream_usage, object_index)
+        return build_leaf_result(exec_field, current_type, val) if val.nil? || val.is_a?(StandardError)
+        return build_leaf_result(exec_field, current_type, val) unless Util.unwrap_non_null(current_type).list?
+
+        initial_count = stream_usage.initial_count
+        item_type = Util.unwrap_non_null(current_type).of_type
+        initial_items, remaining_items, register_stream = split_stream_items(exec_field, val, initial_count)
+
+        initial_result = initial_items.map { build_leaf_result(exec_field, item_type, _1) }
+        if register_stream
+          list_stream_entry = remaining_items if remaining_items.is_a?(Incremental::ListStreamEntry)
+          register_stream_scope(
+            exec_field,
+            exec_field.scope.parent_type,
+            EMPTY_ARRAY,
+            [],
+            [],
+            [],
+            [],
+            stream_usage,
+            object_index,
+            initial_items.length,
+            prepare: if list_stream_entry
+              ->(stream_scope, raw_items) { prepare_leaf_stream_scope(stream_scope, exec_field, item_type, remaining_items, raw_items) }
+            else
+              ->(stream_scope) { prepare_leaf_stream_scope(stream_scope, exec_field, item_type, remaining_items) }
+            end,
+            list_stream_entry:,
+          )
+        end
+
+        initial_result
+      end
+
+      #: (ExecutionField[untyped], untyped, Integer) -> [Array[untyped], untyped, bool]
+      def split_stream_items(exec_field, value, initial_count)
+        case value
+        when Incremental::ListStreamSource
+          initial_items = value.initial_items
+          remaining_items = value.remaining_items
+          return [initial_items, remaining_items, !remaining_items.nil?]
+        when Array
+          return [value.take(initial_count), value.drop(initial_count), initial_count <= value.length]
+        when Enumerable
+          initial_items = []
+          iterator = value.each #: as Enumerator
+          while initial_items.length < initial_count
+            begin
+              initial_items << iterator.next
+            rescue StopIteration
+              return [initial_items, iterator, false]
+            end
+          end
+          return [initial_items, iterator, true]
+        end
+
+        raise InvalidListResultError.new(exec_field:, result_type: value.class)
+      end
+
+      #: (ExecutionField[untyped], untyped) { (untyped, Integer) -> void } -> void
+      def each_stream_item(exec_field, items, &block)
+        if items.is_a?(Array)
+          items.each_with_index { |item, index| yield item, index }
+        elsif items.respond_to?(:next)
+          index = 0
+          loop do
+            yield items.next, index
+            index += 1
+          end
+        elsif items.is_a?(Enumerable)
+          items.each_with_index { |item, index| yield item, index }
+        else
+          raise InvalidListResultError.new(exec_field:, result_type: items.class)
+        end
+      rescue StopIteration
+        nil
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   untyped item_type,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #|   untyped remaining_items,
+      #|   Integer initial_count,
+      #| ) -> void
+      def register_composite_stream_scope(exec_field, item_type, stream_usage, object_index, remaining_items, initial_count)
+        stream_items = []
+        stream_objects = []
+        stream_results = []
+        object_paths = []
+        stream_path = exec_field.object_path(object_index)
+        list_stream_entry = remaining_items if remaining_items.is_a?(Incremental::ListStreamEntry)
+
+        register_stream_scope(
+          exec_field,
+          item_type.unwrap,
+          exec_field.selections,
+          stream_objects,
+          stream_results,
+          stream_items,
+          object_paths,
+          stream_usage,
+          object_index,
+          initial_count,
+          prepare: if list_stream_entry
+            ->(stream_scope, raw_items) do
+              raw_items.each_with_index do |src, index|
+                before_results = stream_scope.results.length
+                stream_scope.items << build_and_flatmap_composite_result(exec_field, item_type, src, stream_scope.objects, stream_scope.results)
+                while before_results < stream_scope.results.length
+                  stream_scope.object_paths[before_results] = [*stream_path, stream_scope.initial_index + index]
+                  before_results += 1
+                end
+              end
+            end
+          else
+            ->(stream_scope) do
+              each_stream_item(exec_field, remaining_items) do |src, index|
+                before_results = stream_scope.results.length
+                stream_scope.items << build_and_flatmap_composite_result(exec_field, item_type, src, stream_scope.objects, stream_scope.results)
+                while before_results < stream_scope.results.length
+                  stream_scope.object_paths[before_results] = [*stream_path, initial_count + index]
+                  before_results += 1
+                end
+              end
+            end
+          end,
+          list_stream_entry:,
+        )
+      end
+
+      #: (Incremental::StreamExecutionScope, ExecutionField[untyped], untyped, untyped, ?Array[untyped]?) -> void
+      def prepare_leaf_stream_scope(stream_scope, exec_field, item_type, remaining_items, raw_items = nil)
+        items = raw_items || remaining_items
+        if raw_items
+          items.each { |val| stream_scope.items << build_leaf_result(exec_field, item_type, val) }
+        else
+          each_stream_item(exec_field, items) do |val, _index|
+            stream_scope.items << build_leaf_result(exec_field, item_type, val)
+          end
+        end
+      end
+
+      #: (
+      #|   ExecutionField[untyped] exec_field,
+      #|   singleton(GraphQL::Schema::Object) parent_type,
+      #|   Array[selection_node] selections,
+      #|   Array[untyped] objects,
+      #|   Array[untyped] results,
+      #|   Array[untyped] items,
+      #|   Array[error_path] object_paths,
+      #|   Incremental::StreamUsage stream_usage,
+      #|   Integer object_index,
+      #|   Integer initial_count,
+      #|   ?prepare: Proc?,
+      #|   ?list_stream_entry: Incremental::ListStreamEntry?,
+      #| ) -> void
+      def register_stream_scope(exec_field, parent_type, selections, objects, results, items, object_paths, stream_usage, object_index, initial_count, prepare: nil, list_stream_entry: nil)
+        stream_path = exec_field.object_path(object_index)
+        stream_delivery = Incremental::StreamDelivery.new(stream_path, stream_usage.label)
+        stream_scope = Incremental::StreamExecutionScope.new(
+          parent_field: exec_field,
+          parent_type:,
+          selections:,
+          objects:,
+          results:,
+          items:,
+          object_paths:,
+          delivery: stream_delivery,
+          initial_index: initial_count,
+          prepare:,
+          list_stream_entry:,
+        )
+        list_stream_entry.scope = stream_scope if list_stream_entry
+        @incremental.register_stream_scope(stream_scope)
       end
 
       #: (
@@ -987,47 +1349,172 @@ module GraphQL
 
       #: (Enumerator::Yielder) -> void
       def execute_next_incremental_result(yielder)
-        pending_payloads = []
-        incremental_payloads = []
-        completed_deliveries = []
-        completed_errors_by_delivery = {}.compare_by_identity
-
         loop do
-          ready_scopes = @incremental.ready_scopes
-          break if ready_scopes.empty?
+          pending_payloads = [] #: Array[graphql_result]
+          incremental_payloads = [] #: Array[graphql_result]
+          completed_deliveries = [] #: Array[Incremental::Delivery]
+          completed_errors_by_delivery = {}.compare_by_identity #: Hash[Incremental::Delivery, Array[error_hash]]
+          next_installment_streams = [] #: Array[Incremental::StreamExecutionScope]
 
-          initial_error_count = @invalidated_results.size
-          run!(@planner.plan_scopes(ready_scopes))
-          has_errors = @invalidated_results.size > initial_error_count
+          loop do
+            ready_scopes = @incremental.ready_scopes
+            break if ready_scopes.empty?
 
-          ready_scopes.each do |exec_scope|
-            deliveries = @incremental.deliveries_for(exec_scope)
-            deliveries.each do |index, path, deferred_deliveries|
-              data = exec_scope.results[index]
-              errors = EMPTY_ARRAY
-              if has_errors
-                data, errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
-              end
+            prepare_ready_incremental_scopes(ready_scopes)
 
-              if data.nil? && !errors.empty?
-                deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(errors) }
+            initial_error_count = @invalidated_results.size
+            scopes_to_execute = ready_scopes.reject { _1.is_a?(Incremental::StreamExecutionScope) && _1.objects.empty? }
+            run!(@planner.plan_scopes(scopes_to_execute)) unless scopes_to_execute.empty?
+            has_errors = @invalidated_results.size > initial_error_count
+
+            ready_scopes.each do |exec_scope|
+              if exec_scope.is_a?(Incremental::StreamExecutionScope)
+                items, stream_errors = stream_items_for(exec_scope)
+                incremental_payloads << @incremental.stream_payload(exec_scope.delivery, items, errors: stream_errors) unless items.empty?
+                if exec_scope.complete?
+                  completed_deliveries << exec_scope.delivery
+                else
+                  next_installment_streams << exec_scope
+                end
               else
-                incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors:)
-              end
-              completed_deliveries.concat(deferred_deliveries)
-            end
+                deliveries = @incremental.deliveries_for(exec_scope)
+                deliveries.each do |index, path, deferred_deliveries|
+                  data = exec_scope.results[index]
+                  deferred_errors = EMPTY_ARRAY
+                  if has_errors
+                    data, deferred_errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, data, path)
+                  end
 
-            exec_scope.executed = true
-            pending_payloads.concat(@incremental.pending_payloads(@incremental.prepare_pending))
+                  if data.nil? && !deferred_errors.empty?
+                    deferred_deliveries.each { (completed_errors_by_delivery[_1] ||= []).concat(deferred_errors) }
+                  else
+                    incremental_payloads << @incremental.incremental_payload(deferred_deliveries, path, data, errors: deferred_errors)
+                  end
+                  completed_deliveries.concat(deferred_deliveries)
+                end
+              end
+
+              exec_scope.executed = true
+              pending_payloads.concat(@incremental.pending_payloads(@incremental.prepare_pending))
+            end
+          end
+
+          next_installment_streams.each(&:finish_installment!)
+          completed_payloads = @incremental.completed_payloads(completed_deliveries, errors_by_delivery: completed_errors_by_delivery)
+          has_next = @incremental.deferred?
+          payload = { "hasNext" => has_next }
+          payload["pending"] = pending_payloads unless pending_payloads.empty?
+          payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
+          payload["completed"] = completed_payloads unless completed_payloads.empty?
+          yielder << payload
+          break unless has_next
+        end
+      end
+
+      #: (Array[Incremental::DeferredExecutionScope | Incremental::StreamExecutionScope]) -> void
+      def prepare_ready_incremental_scopes(ready_scopes)
+        list_stream_entries_by_field = Hash.new { |h, stream_field| h[stream_field] = [] }.compare_by_identity #: Hash[ListStreamField, Array[Incremental::ListStreamEntry]]
+
+        ready_scopes.each do |exec_scope|
+          if exec_scope.is_a?(Incremental::StreamExecutionScope) && exec_scope.stream?
+            list_stream_entry = exec_scope.list_stream_entry #: as !nil
+            entries = list_stream_entries_by_field[list_stream_entry.field] #: as !nil
+            entries << list_stream_entry
+          else
+            exec_scope.prepare!
           end
         end
 
-        completed_payloads = @incremental.completed_payloads(completed_deliveries, errors_by_delivery: completed_errors_by_delivery)
-        payload = { "hasNext" => false }
-        payload["pending"] = pending_payloads unless pending_payloads.empty?
-        payload["incremental"] = incremental_payloads unless incremental_payloads.empty?
-        payload["completed"] = completed_payloads unless completed_payloads.empty?
-        yielder << payload
+        prepare_list_stream_fields(list_stream_entries_by_field) unless list_stream_entries_by_field.empty?
+      end
+
+      #: (Hash[ListStreamField, Array[Incremental::ListStreamEntry]]) -> void
+      def prepare_list_stream_fields(entries_by_field)
+        stream_fields = [] #: Array[ListStreamField]
+
+        entries_by_field.each do |stream_field, entries|
+          stream_field.retain_pending_entries(entries)
+          next if stream_field.pending_entries.empty?
+
+          resolve_list_stream_chunks(stream_field, limit: nil)
+          stream_fields << stream_field
+        end
+
+        lazy_stream_fields = stream_fields.select(&:lazy_result?)
+        execute_lazy(lazy_stream_fields) unless lazy_stream_fields.empty?
+
+        stream_fields.each do |stream_field|
+          prepare_list_stream_field(stream_field)
+        end
+      end
+
+      #: (ListStreamField) -> void
+      def prepare_list_stream_field(stream_field)
+        chunks = stream_field.result #: as Array[untyped]
+        entries = stream_field.pending_entries
+
+        unless chunks.length == entries.length
+          exec_field = stream_field.parent_field
+          handle_or_reraise(ResultCountMismatchError.new(
+            exec_field: exec_field,
+            expected_count: entries.length,
+            actual_count: chunks.length,
+          ))
+          chunks = Array.new(entries.length)
+        end
+
+        completed_entries = [] #: Array[Incremental::ListStreamEntry]
+        entries.each_with_index do |entry, index|
+          stream_scope = entry.scope #: as !nil
+          chunk = chunks[index]
+          if chunk.is_a?(StandardError)
+            stream_scope.prepare_list_stream_items!([chunk])
+            stream_scope.complete!
+            completed_entries << entry
+            next
+          end
+
+          items, complete = normalize_list_stream_chunk(stream_field.parent_field, chunk)
+          stream_scope.prepare_list_stream_items!(items)
+          if complete
+            stream_scope.complete!
+            completed_entries << entry
+          end
+        end
+
+        stream_field.drop_pending_entries(completed_entries) unless completed_entries.empty?
+      end
+
+      #: (Incremental::StreamExecutionScope) -> [Array[untyped], Array[error_hash]]
+      def stream_items_for(exec_scope)
+        items = []
+        errors = []
+
+        exec_scope.items.each_with_index do |item, index|
+          path = exec_scope.item_path(index)
+          if (err = @invalidated_results[item])
+            append_stream_item_errors(err, errors, path)
+            items << nil
+          elsif !exec_scope.selections.empty?
+            data, item_errors = error_result_formatter.format_object(exec_scope.parent_type, exec_scope.selections, item, path)
+            errors.concat(item_errors)
+            items << data
+          else
+            items << item
+          end
+        end
+
+        [items, errors]
+      end
+
+      #: (ExecutionError, Array[error_hash], error_path) -> void
+      def append_stream_item_errors(error, errors, path)
+        error.each do |err|
+          next if err.equal?(UNREPORTED_ERROR)
+
+          errors << err.to_h.tap { _1["path"] = path }
+          @context.errors << err.cause if err.cause
+        end
       end
 
       #: (?data: Util::NilLike | graphql_result | nil, ?errors: Array[error_hash]) -> graphql_result

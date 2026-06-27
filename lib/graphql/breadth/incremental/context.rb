@@ -19,11 +19,12 @@ module GraphQL
           @executor = executor
           @data = data
           @publisher = Publisher.new
-          @deferred_scopes = []
-          @pending_deliveries = []
-          @announced_deliveries = {}.compare_by_identity
-          @completed_deliveries = {}.compare_by_identity
-          @deliveries_by_usage = {}.compare_by_identity
+          @deferred_scopes = [] #: Array[DeferredExecutionScope]
+          @stream_scopes = [] #: Array[StreamExecutionScope]
+          @pending_deliveries = [] #: Array[Delivery]
+          @announced_deliveries = {}.compare_by_identity #: Hash[Delivery, bool]
+          @completed_deliveries = {}.compare_by_identity #: Hash[Delivery, bool]
+          @deliveries_by_usage = {}.compare_by_identity #: Hash[DeferUsage, Array[DeferredDelivery]]
         end
 
         #: (Executor::ExecutionScope, Hash[String, Array[Selection]], Set[DeferUsage]) -> void
@@ -35,6 +36,11 @@ module GraphQL
           )
         end
 
+        #: (StreamExecutionScope) -> void
+        def register_stream_scope(stream_scope)
+          @stream_scopes << stream_scope
+        end
+
         #: -> bool
         def active?
           true
@@ -42,16 +48,27 @@ module GraphQL
 
         #: -> bool
         def deferred?
-          @deferred_scopes.any?
+          @deferred_scopes.any? { !_1.executed? && _1.ready? } ||
+            @stream_scopes.any? { !_1.complete? && _1.ready? && !deferred_path_nulled?(_1.delivery.path) }
         end
 
-        #: -> Array[DeferredDelivery]
+        #: -> Array[Delivery]
         def prepare_pending
           @deferred_scopes.each do |deferred_scope|
             next if deferred_scope.announced? || !deferred_scope.ready?
 
             pending_deliveries_for(deferred_scope)
             deferred_scope.announced = true
+          end
+          @stream_scopes.each do |stream_scope|
+            next if stream_scope.complete? || stream_scope.announced? || !stream_scope.ready? || deferred_path_nulled?(stream_scope.delivery.path)
+
+            delivery = stream_scope.delivery
+            unless @completed_deliveries[delivery] || @announced_deliveries[delivery]
+              @announced_deliveries[delivery] = true
+              @pending_deliveries << delivery
+            end
+            stream_scope.announced = true
           end
 
           @pending_deliveries.uniq!
@@ -60,9 +77,13 @@ module GraphQL
           pending
         end
 
-        #: -> Array[DeferredExecutionScope]
+        #: -> Array[DeferredExecutionScope | StreamExecutionScope]
         def ready_scopes
-          @deferred_scopes.select { _1.announced? && !_1.executed? && _1.ready? }.each(&:prepare!)
+          ready = (
+            @deferred_scopes.select { _1.announced? && !_1.executed? && _1.ready? } +
+            @stream_scopes.select { _1.announced? && !_1.executed? && !_1.complete? && _1.ready? && !deferred_path_nulled?(_1.delivery.path) }
+          )
+          ready
         end
 
         #: (DeferredExecutionScope) -> Array[[Integer, error_path, Array[DeferredDelivery]]]
@@ -80,7 +101,7 @@ module GraphQL
           deliveries
         end
 
-        #: (Array[DeferredDelivery]) -> Array[graphql_result]
+        #: (Array[Delivery]) -> Array[graphql_result]
         def pending_payloads(deliveries)
           @publisher.pending(deliveries)
         end
@@ -90,7 +111,12 @@ module GraphQL
           @publisher.incremental(deliveries, path, data, errors:)
         end
 
-        #: (Array[DeferredDelivery], ?errors_by_delivery: Hash[DeferredDelivery, Array[error_hash]]) -> Array[graphql_result]
+        #: (StreamDelivery, Array[untyped], ?errors: Array[error_hash]) -> graphql_result
+        def stream_payload(delivery, items, errors: EMPTY_ARRAY)
+          @publisher.stream(delivery, items, errors:)
+        end
+
+        #: (Array[Delivery], ?errors_by_delivery: Hash[Delivery, Array[error_hash]]) -> Array[graphql_result]
         def completed_payloads(deliveries, errors_by_delivery: EMPTY_OBJECT)
           deliveries.uniq.filter_map do |delivery|
             next if @completed_deliveries[delivery]

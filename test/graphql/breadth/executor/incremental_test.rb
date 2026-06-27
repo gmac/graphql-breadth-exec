@@ -30,6 +30,109 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     end
   end
 
+  class PagedProductNodesResolver < GraphQL::Breadth::FieldResolver
+    attr_reader :calls
+
+    def initialize(page_size: nil)
+      @page_size = page_size
+      @calls = []
+    end
+
+    def stream?
+      true
+    end
+
+    def resolve(exec_field, _ctx)
+      exec_field.map_objects { _1["nodes"] }
+    end
+
+    def resolve_list_stream(field, _ctx)
+      field.state[:calls] = @calls
+      @calls << {
+        limit: field.limit,
+        iteration: field.iteration,
+        object_count: field.pending_entries.length,
+        arguments: field.arguments,
+      }
+
+      field.pending_entries.map do |entry|
+        object = entry.object
+        nodes = object.fetch("nodes")
+        object_state = entry.object_state
+        offset = object_state[:offset] || 0
+        page_size = field.limit || @page_size || nodes.length
+        items = nodes.slice(offset, page_size) || []
+        object_state[:offset] = offset + items.length
+        complete = object_state[:offset] >= nodes.length
+
+        complete && items.empty? ? nil : GraphQL::Breadth::ListStreamChunk.new(items:, complete:)
+      end
+    end
+  end
+
+  class LazyPagedProductNodesResolver < GraphQL::Breadth::FieldResolver
+    def stream?
+      true
+    end
+
+    def resolve(exec_field, _ctx)
+      exec_field.map_objects { _1["nodes"] }
+    end
+
+    def resolve_list_stream(field, _ctx)
+      field
+        .lazy(loader_class: BatchTrackingLoader, keys: field.pending_entries.map { [field.key, _1.object["nodes"]] })
+        .then do |entries|
+          entries.map do |(_field_key, nodes)|
+            GraphQL::Breadth::ListStreamChunk.new(items: nodes, complete: true)
+          end
+        end
+    end
+  end
+
+  class PagedVariantNodesResolver < GraphQL::Breadth::FieldResolver
+    attr_reader :calls
+
+    def initialize
+      @calls = []
+    end
+
+    def stream?
+      true
+    end
+
+    def resolve(exec_field, _ctx)
+      exec_field.map_objects { _1["nodes"] }
+    end
+
+    def resolve_list_stream(field, _ctx)
+      field.state[:calls] = @calls
+      @calls << {
+        limit: field.limit,
+        iteration: field.iteration,
+        objects: field.pending_entries.map { _1.object["name"] },
+        arguments: field.arguments,
+      }
+
+      field.pending_entries.map do |entry|
+        object = entry.object
+        nodes = object.fetch("nodes")
+        object_state = entry.object_state
+        offset = object_state[:offset] || 0
+        page_size = field.limit || 1
+        items = nodes.slice(offset, page_size) || []
+        object_state[:offset] = offset + items.length
+
+        if field.iteration.zero?
+          GraphQL::Breadth::ListStreamChunk.new(items:, complete: false)
+        else
+          complete = object_state[:offset] >= nodes.length
+          complete && items.empty? ? nil : GraphQL::Breadth::ListStreamChunk.new(items:, complete:)
+        end
+      end
+    end
+  end
+
   SOURCE = {
     "products" => {
       "nodes" => [{
@@ -50,6 +153,38 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
           "nodes" => [{
             "id" => "gid://shopify/Variant/2",
             "title" => "Small Apple",
+          }],
+        },
+      }],
+    },
+  }.freeze
+
+  PAGED_VARIANTS_SOURCE = {
+    "products" => {
+      "nodes" => [{
+        "id" => "gid://shopify/Product/1",
+        "title" => "Banana",
+        "variants" => {
+          "name" => "Banana variants",
+          "nodes" => [{
+            "id" => "gid://shopify/Variant/1",
+            "title" => "Small Banana",
+          }],
+        },
+      }, {
+        "id" => "gid://shopify/Product/2",
+        "title" => "Apple",
+        "variants" => {
+          "name" => "Apple variants",
+          "nodes" => [{
+            "id" => "gid://shopify/Variant/2",
+            "title" => "Small Apple",
+          }, {
+            "id" => "gid://shopify/Variant/3",
+            "title" => "Medium Apple",
+          }, {
+            "id" => "gid://shopify/Variant/4",
+            "title" => "Large Apple",
           }],
         },
       }],
@@ -913,7 +1048,264 @@ class GraphQL::Breadth::Executor::IncrementalTest < Minitest::Test
     )
   end
 
+  def test_incremental_result_streams_list_field
+    resolver = PagedProductNodesResolver.new
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1) {
+          id
+          title
+        }
+      }
+    }|, resolvers: stream_product_nodes_resolvers(resolver)).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{ "id" => "gid://shopify/Product/1", "title" => "Banana" }],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Product/2", "title" => "Apple" }],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_streams_with_default_initial_count
+    resolver = PagedProductNodesResolver.new
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream {
+          id
+        }
+      }
+    }|, resolvers: stream_product_nodes_resolvers(resolver)).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [],
+          },
+        },
+        "pending" => [{ "id" => "0", "path" => ["products", "nodes"] }],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [
+            { "id" => "gid://shopify/Product/1" },
+            { "id" => "gid://shopify/Product/2" },
+          ],
+          "id" => "0",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+  end
+
+  def test_incremental_result_batches_opt_in_list_streams_and_drops_completed_objects
+    resolver = PagedVariantNodesResolver.new
+    resolvers = BREADTH_RESOLVERS.merge(
+      "VariantConnection" => BREADTH_RESOLVERS.fetch("VariantConnection").merge(
+        "nodes" => resolver,
+      ),
+    )
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes {
+          id
+          variants(first: 3) {
+            nodes @stream(initialCount: 1) {
+              id
+            }
+          }
+        }
+      }
+    }|, source: PAGED_VARIANTS_SOURCE, resolvers:).incremental_result
+
+    assert_equal(
+      {
+        "data" => {
+          "products" => {
+            "nodes" => [{
+              "id" => "gid://shopify/Product/1",
+              "variants" => {
+                "nodes" => [{ "id" => "gid://shopify/Variant/1" }],
+              },
+            }, {
+              "id" => "gid://shopify/Product/2",
+              "variants" => {
+                "nodes" => [{ "id" => "gid://shopify/Variant/2" }],
+              },
+            }],
+          },
+        },
+        "pending" => [
+          { "id" => "0", "path" => ["products", "nodes", 0, "variants", "nodes"] },
+          { "id" => "1", "path" => ["products", "nodes", 1, "variants", "nodes"] },
+        ],
+        "hasNext" => true,
+      },
+      result.initial_result,
+    )
+    assert_equal(
+      [{
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Variant/3" }],
+          "id" => "1",
+        }],
+        "completed" => [{ "id" => "0" }],
+        "hasNext" => true,
+      }, {
+        "incremental" => [{
+          "items" => [{ "id" => "gid://shopify/Variant/4" }],
+          "id" => "1",
+        }],
+        "completed" => [{ "id" => "1" }],
+        "hasNext" => false,
+      }],
+      result.subsequent_results.to_a,
+    )
+    assert_equal(
+      [{
+        limit: 1,
+        iteration: 0,
+        objects: ["Banana variants", "Apple variants"],
+        arguments: {},
+      }, {
+        limit: nil,
+        iteration: 1,
+        objects: ["Banana variants", "Apple variants"],
+        arguments: {},
+      }, {
+        limit: nil,
+        iteration: 2,
+        objects: ["Apple variants"],
+        arguments: {},
+      }],
+      resolver.calls,
+    )
+  end
+
+  def test_incremental_result_includes_stream_label
+    resolver = PagedProductNodesResolver.new
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 1, label: "ProductNodes") {
+          id
+        }
+      }
+    }|, resolvers: stream_product_nodes_resolvers(resolver)).incremental_result
+
+    assert_equal(
+      [{ "id" => "0", "path" => ["products", "nodes"], "label" => "ProductNodes" }],
+      result.initial_result.fetch("pending"),
+    )
+  end
+
+  def test_incremental_result_does_not_stream_when_if_is_false
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream(initialCount: 0, if: false) {
+          id
+        }
+      }
+    }|).incremental_result
+
+    expected = {
+      "data" => {
+        "products" => {
+          "nodes" => [
+            { "id" => "gid://shopify/Product/1" },
+            { "id" => "gid://shopify/Product/2" },
+          ],
+        },
+      },
+    }
+
+    refute result.incremental?
+    assert_equal expected, result.initial_result
+    assert_equal [], result.subsequent_results.to_a
+  end
+
+  def test_ready_stream_executions_batch_lazy_work
+    resolvers = stream_product_nodes_resolvers.merge(
+      "Product" => BREADTH_RESOLVERS.fetch("Product").merge(
+        "title" => LazyHashResolver.new("title"),
+      ),
+    )
+
+    BatchTrackingLoader.perform_keys = []
+
+    result = build_executor(%|{
+      products(first: 2) {
+        nodes @stream {
+          title
+        }
+      }
+    }|, resolvers:).incremental_result
+
+    result.subsequent_results.to_a
+
+    assert_equal(
+      [["Banana", "Apple"]],
+      BatchTrackingLoader.perform_keys,
+    )
+  end
+
+  def test_ready_list_stream_fields_batch_lazy_resolver_work_across_streams
+    resolver = LazyPagedProductNodesResolver.new
+    BatchTrackingLoader.perform_keys = []
+
+    result = build_executor(%|{
+      products(first: 2) {
+        first: nodes @stream {
+          id
+        }
+        second: nodes @stream {
+          id
+        }
+      }
+    }|, resolvers: stream_product_nodes_resolvers(resolver)).incremental_result
+
+    result.subsequent_results.to_a
+
+    nodes = SOURCE.fetch("products").fetch("nodes")
+    assert_equal(
+      [[["first", nodes], ["second", nodes]]],
+      BatchTrackingLoader.perform_keys,
+    )
+  end
+
   private
+
+  def stream_product_nodes_resolvers(resolver = PagedProductNodesResolver.new)
+    BREADTH_RESOLVERS.merge(
+      "ProductConnection" => BREADTH_RESOLVERS.fetch("ProductConnection").merge(
+        "nodes" => resolver,
+      ),
+    )
+  end
 
   def build_executor(document, source: SOURCE, resolvers: BREADTH_RESOLVERS)
     GraphQL::Breadth::Executor.new(

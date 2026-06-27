@@ -6,11 +6,11 @@ module GraphQL
     module Incremental
       class Publisher
         def initialize
-          @ids = {}.compare_by_identity
+          @ids = {}.compare_by_identity #: Hash[Delivery, String]
           @next_id = 0
         end
 
-        #: (Array[DeferredDelivery]) -> Array[graphql_result]
+        #: (Array[Delivery]) -> Array[graphql_result]
         def pending(deliveries)
           deliveries.map do |delivery|
             result = {
@@ -36,7 +36,17 @@ module GraphQL
           result
         end
 
-        #: (DeferredDelivery, ?errors: Array[error_hash]) -> graphql_result
+        #: (StreamDelivery, Array[untyped], ?errors: Array[error_hash]) -> graphql_result
+        def stream(delivery, items, errors: EMPTY_ARRAY)
+          result = {
+            "items" => items,
+            "id" => id_for(delivery),
+          }
+          result["errors"] = errors unless errors.empty?
+          result
+        end
+
+        #: (Delivery, ?errors: Array[error_hash]) -> graphql_result
         def completed(delivery, errors: EMPTY_ARRAY)
           result = { "id" => id_for(delivery) }
           result["errors"] = errors unless errors.empty?
@@ -46,7 +56,7 @@ module GraphQL
 
         private
 
-        #: (DeferredDelivery) -> String
+        #: (Delivery) -> String
         def id_for(delivery)
           @ids[delivery] ||= begin
             id = @next_id.to_s
