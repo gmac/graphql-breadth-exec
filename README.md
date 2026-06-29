@@ -25,12 +25,11 @@ graphql-ruby dataloader: 1000 x 1 lazy scalar:      114.6 i/s - 21.56x  slower
 
 # Support
 
-The execution algorithm is proven at scale in production. This implementation still has some limitations:
+The core execution algorithm is proven at scale in production. Subscriptions and Defer are experimental. Other limitations:
 
-* Uses GraphQL Ruby schemas.
 * Currently no built-in validation or analysis, do it ahead of time.
 * Currently no stream.
-* Supports input validations, but NOT input transformations (ie: "prepare" hooks).
+* Supports input validations, but intentionally omits input prepare hooks. Holistically prepare inputs in resolvers.
 
 # Usage
 
@@ -89,7 +88,7 @@ This taxonomy provides the following API, which is useful while writing resolver
   - `scope`: the parent execution scope that this field belongs to.
   - `resolve_all(<value>)`: resolves a value mapped to all field objects. Useful for early returns.
   - `preload(<LazyLoader>, keys: [...]?, args: { ... }?)`: Registers a lazy preloader to run before the field executes. May only be called by field planner methods.
-  - `lazy(<LazyLoader>?, keys: [...], args: { ... }?)`: defers to lazy execution and returns a Promise. Similar to GraphQL Batch with some fundamental changes, see [documentation](#lazy-resolvers). May only be called by field resolver methods.
+  - `lazy(<LazyLoader>?, keys: [...], args: { ... }?)`: defers to lazy execution and returns a Promise. May only be called by field resolver methods.
   - `attributes`: a hash intended for local caching and freeform planning notes.
   - `attribute(<name>)`: reads an attribute without allocating storage.
   - `attribute?(<name>)`: checks an attribute without allocating storage.
@@ -168,7 +167,7 @@ end
 
 ### Attribute caches
 
-Field resolvers may build resources that could be shared with other fields across their scope. It's easy to share this sort of data using `attributes`. Both execution fields [and their scopes](#execution-taxonomy) support setting attributes:
+Field resolvers may build resources that can be shared with other fields across their scope. It's easy to share this sort of data using `attributes`. Both execution fields [and their scopes](#execution-taxonomy) support setting attributes:
 
 ```ruby
 class MyFieldResolver < GraphQL::Breadth::FieldResolver
@@ -244,39 +243,45 @@ query {
 
 In the above, we'll want `Image.sources` to batch across all instances of the field, even at different document depths. LazyLoader solves this – which is breadth's analog to traditional dataloaders. Unlike traditional dataloaders though, a breadth LazyLoader binds entire key sets to a single promise, rather than building 1:1 promises. This dramatically reduces lazy overhead.
 
-### Resolver-specific lazy loading
+### Lazy loaders
 
-For the simplest loading scenarios, field resolvers can delegate to their own lazy loading hook with keys that will batch across instances of the field:
+Queries shared across separate fields or multiple instances of the same field need a common LazyLoader class.
 
 ```ruby
-class BasicLazyResolver < GraphQL::Breadth::FieldResolver
-  def resolve(exec_field, context)
-    exec_field.lazy(keys: exec_field.objects.map(&:id))
+class SharedLoader < GraphQL::Breadth::LazyLoader
+  def initialize(group:)
+    super()
+    @group = group
   end
 
-  def perform_lazy(keys, args, context)
-    things_by_key = Thing.where(parent_id: keys).index_by(&:parent_id)
-    keys.map { |key| things_by_key[key] }
+  def perform(ids, context)
+    Thing.where(parent_id: ids, group: @group).to_a.each do |thing|
+      fulfill_key(thing.parent_id, thing)
+    end
   end
 end
-```
 
-Calling `exec_field.lazy` defers a set of keys for lazy fulfillment, which then get loaded by the resolver's `perform_lazy` hook that **must return a mapped set of results**. You can also scope lazy loading with arguments, and wrap it with pre- and post-processing steps:
-
-```ruby
-class FancyLazyResolver < GraphQL::Breadth::FieldResolver
+class SharedLazyResolver < GraphQL::Breadth::FieldResolver
   def resolve(exec_field, context)
     mapped_keys = exec_field.objects.map { |obj| obj.valid? ? obj.id : nil }
 
     exec_field
-      .lazy(args: { group: "a" }, keys: mapped_keys)
+      .lazy(SharedLoader, args: { group: "a" }, keys: mapped_keys)
       .then do |loaded_records|
         loaded_records.map! { |record| record&.my_field }
       end
   end
+end
+```
 
-  def perform_lazy(keys, args, context)
-    things_by_key = Thing.where(parent_id: keys, group: args[:group]).index_by(&:parent_id)
+Here `exec_field.lazy` is called with a LazyLoader class. Within a loader class, call `fulfill_key` to deliver each loaded record. Lazy loaders do NOT require fulfillment of each provided key; unfulfilled keys simply return as `nil`. You can also set up a lazy loader class to fulfill by mapped set, although this frequently adds a mapping layer that calling `fulfill_key` directly would avoid:
+
+```ruby
+class MapLoader < GraphQL::Breadth::LazyLoader
+  def map? = true
+
+  def perform_map(keys, context)
+    things_by_key = Thing.where(parent_id: keys).index_by(&:parent_id)
     keys.map { |key| things_by_key[key] }
   end
 end
@@ -324,50 +329,6 @@ end
 ```
 
 Eager values are specific to their field instance and will _not_ be shared by fields [using the same loader](#shared-lazy-loading). Eager values override the loader cache, so a specific field instance may eagerly resolve its own value for a key while other fields sharing the loader will still load the key as normal.
-
-### Shared lazy loading
-
-Queries shared across field resolvers need a common LazyLoader class.
-
-```ruby
-class SharedLoader < GraphQL::Breadth::LazyLoader
-  def initialize(group:)
-    super()
-    @group = group
-  end
-
-  def perform(ids, context)
-    Thing.where(parent_id: ids, group: @group).to_a.each do |thing|
-      fulfill_key(thing.parent_id, thing)
-    end
-  end
-end
-
-class SharedLazyResolver < GraphQL::Breadth::FieldResolver
-  def resolve(exec_field, context)
-    mapped_keys = exec_field.objects.map { |obj| obj.valid? ? obj.id : nil }
-
-    exec_field
-      .lazy(SharedLoader, args: { group: "a" }, keys: mapped_keys)
-      .then do |loaded_records|
-        loaded_records.map! { |record| record&.my_field }
-      end
-  end
-end
-```
-
-In this case `exec_field.lazy` is called with a LazyLoader class, which delegates loading to an instance of the provided loader class rather than the resolver's own `perform_lazy` method. Within a loader class, call `fulfill_key` to deliver each loaded record. Lazy loaders do NOT require fulfillment of each provided key; unfulfilled keys simply return as `nil`. You can also set up a lazy loader class to fulfill by mapped set, although this frequently adds a mapping layer that calling `fulfill_key` directly would avoid:
-
-```ruby
-class MapLoader < GraphQL::Breadth::LazyLoader
-  def map? = true
-
-  def perform_map(keys, context)
-    things_by_key = Thing.where(parent_id: keys).index_by(&:parent_id)
-    keys.map { |key| things_by_key[key] }
-  end
-end
-```
 
 ### LazyLoader keys vs identities
 
